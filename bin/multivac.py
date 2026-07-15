@@ -191,10 +191,17 @@ class SessionStore:
         data = self._load()
         data[label] = {"tool": tool, "cwd": os.path.abspath(cwd),
                        "session_id": session_id, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)          # atomic
+        fd, tmpname = tempfile.mkstemp(dir=str(self.home), prefix=".sessions-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(data, indent=2))
+            os.replace(tmpname, self.path)  # atomic; preserves the 0600 mode from mkstemp
+        except BaseException:
+            try:
+                os.unlink(tmpname)
+            except OSError:
+                pass
+            raise
         os.chmod(self.path, 0o600)
 
     def all(self):

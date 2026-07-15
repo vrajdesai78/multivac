@@ -119,6 +119,18 @@ def test_session_store_roundtrip(tmp_path):
     mode = (tmp_path / "sessions.json").stat().st_mode
     assert stat.S_IMODE(mode) == 0o600
 
+def test_session_store_put_no_world_readable_tmp_leak(tmp_path):
+    import stat
+    st = mv.SessionStore(tmp_path)
+    st.put("job1", "codex", "/repo", "abc-123")
+    st.put("job2", "claude", "/other", "def-456")
+    # final file is 0600
+    mode = (tmp_path / "sessions.json").stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+    # no leftover mkstemp temp files (the write-then-chmod race window is gone)
+    leftovers = list(tmp_path.glob(".sessions-*.tmp"))
+    assert leftovers == []
+
 def test_session_store_rejects_bad_label(tmp_path):
     import pytest
     st = mv.SessionStore(tmp_path)
