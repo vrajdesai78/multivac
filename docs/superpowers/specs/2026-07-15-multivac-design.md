@@ -235,46 +235,121 @@ Optional local agent registry: `--agent NAME` may resolve from `references/agent
 so the same named agent works across all delegates (passed through natively where supported,
 emulated where not). This keeps "run the security-reviewer" identical regardless of delegate.
 
+## Execution contract (hardened from real-world failures)
+
+Delegated research (codex, Reddit + GitHub, 2026-07-15 — see `references/known-issues.md`)
+found that the hardest failures across all these CLIs are **process-contract failures**, not
+model failures. These are *exactly* why a tested wrapper beats hand-rolled per-call Bash.
+Every child process launched by multivac obeys this contract:
+
+1. **Own the child's stdin.** Default `stdin=DEVNULL`; when piping a prompt, write the full
+   payload and close. *Never* inherit the parent's open stdin — codex, gemini and claude all
+   **hang forever** ("Reading additional input from stdin…", 0% CPU) on an inherited open
+   pipe, reproduced specifically through Claude Code's Bash tool. (Codex #20919, Gemini
+   ref, Claude changelog.)
+2. **Never merge stdout and stderr.** Parse the result only from stdout (or `-o` file);
+   diagnostics, OAuth prompts and (in some codex builds) a *duplicate* final answer land on
+   stderr. (Codex #12566, Gemini #3983/#5602.) Earlier ad-hoc tests used `2>&1` — the wrapper
+   must not.
+3. **Exit 0 is not success.** Require a terminal event / non-empty result artifact before
+   treating a run as done — codex and agy have both returned exit 0 with empty output.
+   (Codex #9091, agy #76.)
+4. **Know the framing per tool.** codex `--json` and `*-stream-json` are **NDJSON** (parse
+   line-by-line); claude `--output-format json` and grok `--output-format json` are a
+   **single object**. With `--json-schema`, claude puts the payload in `structured_output`,
+   not `result`. Tolerate additive envelope fields.
+5. **Enforce an external wall-clock timeout and kill the whole process group.** CLI-level
+   timeouts (e.g. agy `--print-timeout`) do **not** cover auth/startup/compaction hangs.
+   Spawn children in a new session/process-group and `killpg` on expiry. (agy plugin CHANGELOG,
+   grok compaction hangs, gemini `MODEL_CAPACITY_EXHAUSTED` stalls.)
+6. **Repeat all settings on resume.** model, sandbox/mode, approval, output-format do **not**
+   carry over — re-pass them every resume call (already proven for codex `-c sandbox_mode`;
+   grok lost sandbox on resume pre-0.2.56).
+7. **Guard input size.** claude rejects piped stdin > 10 MB; agy silently truncated a large
+   prompt and then hallucinated having read files. Check byte size before spawning; put large
+   context in a file the delegate reads, and don't trust "I read it" without evidence.
+8. **Pin/disable auto-update in automation.** grok auto-updates unless `--no-auto-update`;
+   protocol churn between jobs is a real failure. Record each tool's version in `doctor`.
+
+## Orchestration safety (nesting, concurrency, isolation)
+
+Because the whole point is one agent CLI driving others, the multi-agent failure modes are
+first-class design concerns:
+
+- **Recursion guard.** multivac sets `MULTIVAC_DEPTH` in each child and **refuses** to spawn
+  past `--max-depth` (default 2). This stops accidental exponential fan-out when a delegate
+  reads an `AGENTS.md`/`GEMINI.md` that itself says "consult another agent." A per-call
+  `--max-children` bounds a single `consensus`.
+- **tmp/session isolation for nested claude.** A nested `claude -p` in the same cwd can purge
+  the parent's `/tmp/claude-<uid>/…/tasks` dir and blank the parent's Bash result (Reddit,
+  #issue). When the delegate is `claude`, multivac sets an isolated `CLAUDE_CODE_TMPDIR` and
+  only clears the `CLAUDECODE` nesting marker inside an isolated workspace.
+- **cwd is hidden state.** claude/gemini/grok/agy all locate sessions by working directory.
+  multivac records the **canonical cwd alongside the session id**, passes children an explicit
+  `cwd`, and never lets a delegate `cd` the long-lived parent. "Resume last" is never used for
+  identity in concurrent jobs.
+- **Bounded fan-out + budget.** `consensus` uses one semaphore (default concurrency 3), not
+  N unbounded children — ~25 concurrent codex children have tripped backend 429s that look
+  like a DDoS (Codex #11083). A shared retry budget with jittered backoff, not per-child loops.
+- **Allow-listed environment (superset of key-scrubbing).** Children get a constructed,
+  allow-listed env — not `os.environ` wholesale — so auth-selection vars, `GH_TOKEN`, proxy
+  vars and recursion markers can't leak or silently switch identity/billing.
+
 ## Subscription-auth guarantee
 
-- Scrub `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`,
-  `GOOGLE_API_KEY` from each child's environment unless `--allow-api-keys`.
+- Build each child's env from an **allow-list**, dropping `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `XAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` (unless `--allow-api-keys`) — an inherited
+  key silently moves usage onto **metered API billing** (documented for claude and grok).
 - Never use `claude --bare` (forces `ANTHROPIC_API_KEY`/apiKeyHelper) or `codex --oss`.
 - `doctor` surfaces any scrubbed key so the user knows subscription auth is in force.
+- **Honest cost caveat (not "free"):** "subscription, no API keys" means *no per-model API
+  key* — but headless usage still draws on each plan's terms, and these changed in mid-2026:
+  `claude -p` now consumes a separate **Agent SDK** monthly credit (then pay-as-you-go) rather
+  than the plain subscription allowance; codex/grok/agy have their own headless quotas. multivac
+  surfaces `total_cost_usd` where a CLI reports it and supports per-call budget/turn caps.
 
 ## Session / resume
 
-- State file: `$MULTIVAC_HOME/sessions.json` (default `./.multivac/sessions.json`).
-- Shape: `{ "<label>": { "tool": "...", "session_id": "...", "created": "<iso>" } }`.
-- `--session LABEL` on `ask`: if the label exists **for the same tool**, resume that
-  session; otherwise start fresh and record the new id captured from the delegate's output.
-- ID capture: codex from `--json` event stream; claude/grok from `--output-format json`
-  `.session_id`. **agy is best-effort:** it does not cleanly surface a conversation id in
-  headless mode, so agy resume falls back to `-c` (continue-most-recent) with a logged
-  warning; a label is still recorded so intent is visible.
+- State file: `$MULTIVAC_HOME/sessions.json` (default `./.multivac/sessions.json`,
+  `chmod 600`), written transactionally (temp file + atomic rename).
+- Shape: `{ "<label>": { "tool", "session_id", "cwd" (canonical), "version", "created" } }`.
+- `--session LABEL` on `ask`: if the label exists **for the same tool and cwd**, resume;
+  otherwise start fresh and record. Resume re-passes all mode/model/output flags (contract #6).
+- ID handling (verified): **generate client-side** for claude/grok (`--session-id <uuid>`);
+  **parse** `thread.started.thread_id` for codex; **agy best-effort** — recover the
+  conversation id from `--log-file <tmp>` if parseable, else fall back to `-c` with a warning.
+  cwd is always stored so a concurrent job can't resume the wrong transcript.
 
 ## Output & error handling
 
-- Default output: the delegate's clean final message only. `--json` adds metadata
-  (tool, mode, model, session_id, duration, exit code).
-- Capture: codex `--json -o <tmp>` (read last-message file); claude/grok
-  `--output-format json` (parse `.result`); agy plain stdout with a **non-empty check** to
-  catch its documented non-TTY stdout-drop bug (retry once via a PTY if empty).
-- Errors: non-zero exit → structured error (tool, exit code, stderr tail). "Not logged in"
-  patterns → actionable message (e.g. "run `codex login`").
-- Timeouts: default 180s (codex/claude/grok), 300s (agy — its own default is 5m). Child is
-  killed on timeout; returns a clean timeout error. Overridable via `--timeout`.
+- Default output: the delegate's clean final message only (stdout/`-o` channel, per contract
+  #2). `--json` adds metadata (tool, mode, model, session_id, cwd, duration, exit code, cost).
+- Capture: codex `--json -o <tmp>` (NDJSON events + last-message file); claude/grok
+  `--output-format json` (single object → `.result`/`.text`; `structured_output` under a
+  schema); agy plain stdout with a **non-empty check** + one PTY retry for its stdout-drop bug.
+- Errors: non-zero exit **or** missing terminal event → structured error (tool, exit code,
+  stderr tail). "Not logged in" / untrusted-folder / capacity patterns → actionable messages
+  (e.g. "run `codex login`", "pass `--trust`/pre-trust the dir").
+- Timeouts: external wall-clock, default 180s (codex/claude/grok), 300s (agy). On expiry the
+  whole process group is killed. Overridable via `--timeout`.
 
 ## Testing (TDD)
 
 - Unit tests (`tests/test_multivac.py`), `subprocess` mocked, no network:
-  - mode → correct argv per tool (all 12 combinations),
-  - env scrubbing removes the five keys unless `--allow-api-keys`,
-  - session read/write/resume (including agy fallback path),
-  - output parsing for each capture strategy,
-  - timeout kills child and returns structured error.
+  - mode → correct argv per tool (all 12 combinations), **long-flags only**,
+  - env is allow-listed: the five keys + `CLAUDECODE`/proxy vars dropped unless opted in,
+  - child is spawned with `stdin=DEVNULL` and in its own process group (contract #1, #5),
+  - result parsed from stdout only, never merged with stderr (contract #2),
+  - exit 0 with empty output → error, not success (contract #3),
+  - NDJSON vs single-object framing parsed correctly per tool (contract #4),
+  - session read/write/resume re-passes mode/model flags; matches on tool **and cwd**;
+    agy log-file recovery + fallback path,
+  - `--mode full` without `--yes`/`MULTIVAC_ALLOW_FULL` refuses,
+  - `--max-depth` refusal when `MULTIVAC_DEPTH` is at the limit,
+  - input-size guard rejects oversized prompts before spawning,
+  - timeout kills the whole process group and returns a structured error.
 - One env-gated live smoke test (`MULTIVAC_LIVE=1`): `doctor` + a real `plan` `ask` per
-  installed CLI, asserting a known token round-trips.
+  installed CLI, asserting a known token round-trips and a session resumes.
 
 ## Security model
 
@@ -315,12 +390,17 @@ auditable. Principles, in priority order:
    model output — it only relays text. A "what this does / does NOT do" block sits at the
    top of the script and README.
 
+8. **The delegate itself may be untrustworthy.** A July 2026 community report alleged a grok
+   build uploaded a repo bundle (incl. git history) to vendor storage; unverified, but multivac
+   defaults to read-only, recommends disposable checkouts + `--cwd` scoping for sensitive repos,
+   and never disables a CLI's own network egress on the user's behalf.
+
 ### Residual risk (documented, not solved)
 A delegate run in `edit`/`full` on **untrusted input** can be prompt-injected into
 destructive or exfiltrating actions — inherent to delegating to an agent that has its own
-credentials and filesystem access. Mitigations: read-only default, `--cwd` scoping, and
-`SKILL.md` guidance to keep untrusted-content tasks in `plan`. multivac reduces blast radius;
-it cannot make a full-access agent safe on hostile input.
+credentials and filesystem access. Mitigations: read-only default, `--cwd` scoping,
+recursion/tmp isolation, and host-layer guidance to keep untrusted-content tasks in `plan`.
+multivac reduces blast radius; it cannot make a full-access agent safe on hostile input.
 
 ## Other known risks
 
