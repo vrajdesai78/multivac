@@ -121,6 +121,44 @@ def run_child(argv, *, cwd, env, timeout, stdin_data=None):
     return (None if timed_out else proc.returncode, out or "", err or "", timed_out)
 
 
+def parse_output(tool: str, stdout: str, stderr: str):
+    framing = SPECS[tool]["framing"]
+    if framing == "ndjson":                       # codex
+        answer, sid = None, None
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") == "thread.started":
+                sid = ev.get("thread_id")
+            item = ev.get("item") or {}
+            if ev.get("type") == "item.completed" and item.get("type") == "agent_message":
+                answer = item.get("text", answer)
+        if answer is None:
+            raise ValueError("no agent_message in codex output (run did not complete)")
+        return answer, sid, None
+    if framing == "json":                         # claude / grok
+        obj = json.loads(stdout)
+        if "structured_output" in obj:            # --json-schema path
+            answer = json.dumps(obj["structured_output"])
+        else:
+            answer = obj.get(SPECS[tool]["answer"])
+        if answer is None or (isinstance(answer, str) and not answer.strip()):
+            raise ValueError(f"{tool}: empty result field")
+        sid = obj.get(SPECS[tool]["session"])
+        cost = obj.get("total_cost_usd")
+        return answer, sid, cost
+    # plain (agy)
+    ans = stdout.strip()
+    if not ans:
+        raise ValueError("agy: empty stdout (non-TTY stdout-drop; retry via PTY)")
+    return ans, None, None
+
+
 @dataclass
 class Result:
     tool: str

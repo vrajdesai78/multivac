@@ -79,3 +79,28 @@ def test_run_child_times_out_and_kills_group():
         [_sys.executable, "-c", "import time; time.sleep(30)"],
         cwd=".", env={"PATH": mv.os.environ["PATH"]}, timeout=1)
     assert to is True and (mv.time.time() - t0) < 10
+
+
+import pathlib as _pl
+FX = _pl.Path(__file__).parent / "fixtures"
+
+def test_parse_codex_ndjson():
+    ans, sid, cost = mv.parse_output("codex", (FX / "codex.jsonl").read_text(), "")
+    assert ans == "42" and sid == "019f65bc-e336-7c90-99c5-8ca46a4e603a"
+
+def test_parse_claude_json():
+    ans, sid, cost = mv.parse_output("claude", (FX / "claude.json").read_text(), "")
+    assert ans == "42" and sid == "1099535c-0ef4-4939-965b-7d0fe1f5455e" and abs(cost - 0.2158) < 1e-6
+
+def test_parse_grok_json():
+    ans, sid, cost = mv.parse_output("grok", (FX / "grok.json").read_text(), "")
+    assert ans == "42" and sid == "019f65bc-3a9e-74d0-bb8c-43e09abff9a1"
+
+def test_parse_agy_plain_and_empty_guard():
+    ans, sid, cost = mv.parse_output("agy", (FX / "agy.txt").read_text(), "")
+    assert ans == "42" and sid is None
+    import pytest
+    with pytest.raises(ValueError):
+        mv.parse_output("agy", "   \n", "")          # empty output != success
+    with pytest.raises(ValueError):
+        mv.parse_output("codex", '{"type":"turn.started"}\n', "")   # no agent_message
