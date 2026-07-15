@@ -96,6 +96,13 @@ Answer + session-id extraction differs per tool — the adapter must special-cas
 override, or `--dangerously-bypass-approvals-and-sandbox` for `full`. Verified: passing `-s`
 to resume errors with `unexpected argument '-s'`.
 
+**Web search (for research delegation).** Optional `--web-search` on `ask`/`consensus` maps
+per CLI (verified): codex `-c tools.web_search=true` (**not** `--search`, which is
+interactive-only — `codex exec --search` errors); grok is web-enabled by default
+(`--disable-web-search` to turn off); claude has built-in web search/fetch; agy fronts
+Gemini which has grounded search. Used to delegate "research this on the web / Reddit" tasks
+(this design's own research was run through `codex exec -c tools.web_search=true`).
+
 All four smoke-tested end-to-end: a first `ask` (6×7 → "42") and a `resume` (×2 → "84")
 each returned correct results on their existing subscription logins. agy `-p` returned clean
 stdout non-TTY in v1.1.2 (the documented stdout-drop bug did not reproduce, but the
@@ -163,13 +170,33 @@ Default `plan`. Write modes are explicit per call.
 
 | Mode | codex | agy | claude | grok |
 |---|---|---|---|---|
-| `plan` (read-only) | `-s read-only` | `--mode plan` | default headless (no skip flag) | `--permission-mode plan` |
+| `plan` (read-only) | `-s read-only` | `--mode plan` | `--permission-mode plan` | `--permission-mode plan` |
 | `edit` (auto edits) | `-s workspace-write --ask-for-approval never` | `--mode accept-edits` | `--permission-mode acceptEdits` | `--permission-mode acceptEdits` |
-| `full` (auto all) | `--dangerously-bypass-approvals-and-sandbox` | `--dangerously-skip-permissions` | `--dangerously-skip-permissions` | `--always-approve` |
+| `full` (auto all) | `--dangerously-bypass-approvals-and-sandbox` | `--dangerously-skip-permissions` | `--permission-mode bypassPermissions` | `--permission-mode bypassPermissions` |
 
-Exact per-CLI flag strings are pinned in `references/cli-matrix.md` and asserted by tests;
-any flag not confirmed against the installed CLI version at build time is verified before
-first use, not assumed.
+Verified from `--help`: claude `--permission-mode` accepts `plan|acceptEdits|bypassPermissions`
+(so plan is an explicit read-only mode, not the absence of a flag); grok `--permission-mode`
+accepts `plan|acceptEdits|bypassPermissions` too. On `codex exec resume`, `-s` is rejected —
+sandbox goes via `-c sandbox_mode="…"`.
+
+**Short-flag collision — internal rule: always build argv with long flags.** `-s` means
+`--sandbox` in codex but `--session-id` in grok; `-p` is print in agy/claude/grok but not a
+mode anywhere. The wrapper never uses short flags in generated argv, to prevent cross-adapter
+mistakes. Exact strings are pinned in `references/cli-matrix.md` and asserted by tests; any
+flag not confirmed against the installed CLI version at build time is verified before first
+use, not assumed.
+
+### Session-id strategy (differs by CLI — verified)
+
+| CLI | Strategy | Mechanism |
+|---|---|---|
+| `claude` | **generate client-side** | pass `--session-id <uuid>` on first call, `--resume <uuid>` after — no parsing needed |
+| `grok` | **generate client-side** | pass `--session-id <uuid>` (new), `--resume <uuid>` after |
+| `codex` | **parse from output** | read `thread.started.thread_id` from `--json`; resume `codex exec resume <id>` |
+| `agy` | **best-effort** | `--conversation <id>` resumes by id, but id isn't in stdout; recover it from `--log-file <tmp>` if parseable, else fall back to `-c` |
+
+Generating the UUID up front (claude, grok) is preferred: multivac always knows the label→id
+mapping without depending on output parsing.
 
 ## Subagents (`--agent` / `--agents`)
 
@@ -189,10 +216,18 @@ Support differs per delegate (verified against installed CLIs):
 | `agy` | ✅ passthrough `--agent` | ⚠️ no inline flag | named native; inline **emulated** |
 | `codex` | ⚠️ no agent flag | ⚠️ no agent flag | both **emulated** |
 
-**Emulation** (agy inline, codex both): multivac folds the agent's `prompt` (system prompt)
-into a preamble prepended to the delegated prompt — "You are acting as the `<name>` agent.
-<system prompt>. Task: <prompt>." A named `--agent` with no local definition on an
-emulated delegate is an error with guidance (define it inline or via the local registry).
+**Emulation uses native system-prompt flags where they exist, preamble only as last resort:**
+
+| Delegate | Inline-agent system prompt applied via |
+|---|---|
+| `claude` | `--agents` (native) or `--append-system-prompt` |
+| `grok` | `--agents` (native) or `--system-prompt-override` |
+| `agy` | prompt preamble (no system-prompt flag) |
+| `codex` | prompt preamble; if the agent implies review, route to `codex exec review` |
+
+Preamble form when needed: "You are acting as the `<name>` agent. <system prompt>. Task:
+<prompt>." A named `--agent` with no local definition on an emulated delegate is an error
+with guidance (define it inline or via the local registry).
 Delegates that spawn their **own** internal subagents mid-task (claude, grok, agy) are left
 free to do so in `edit`/`full`; multivac never passes `--no-subagents` unless asked.
 
