@@ -6,28 +6,36 @@
 
 ## Summary
 
-`multivac` is a Claude Code skill that lets Claude synchronously invoke other
-AI coding CLIs — **codex**, **agy** (Antigravity, which fronts Gemini/Claude/GPT-OSS),
-**claude**, and **grok** — from inside a session, to get a second opinion, delegate a
-coding task, or run a cross-CLI consensus. Every call rides the target CLI's **existing
+`multivac` lets an **orchestrator CLI — Claude Code or Codex — synchronously invoke and
+message the other AI coding CLIs** as delegates: **codex**, **agy** (Antigravity, which
+fronts Gemini/Claude/GPT-OSS), **claude**, and **grok**. From inside a host session you can
+get a second opinion, delegate a coding task, target a **named or inline-defined subagent**
+on the delegate, run a **cross-CLI consensus**, and **send follow-up messages** into a
+resumable delegate conversation. Every call rides the target CLI's **existing
 subscription/OAuth login** — no per-model API keys.
 
-The skill is one `SKILL.md` (tells Claude *when/how* to invoke) plus one dependency-free
-Python 3 wrapper, `bin/multivac.py` (does the *how* reliably: flag mapping, timeouts,
-session capture, output parsing, auth safety). It installs from a public repo with no
-`pip`/`npm` step.
+The core is one dependency-free Python 3 wrapper, `bin/multivac.py` — caller-agnostic, so it
+works identically whichever CLI is orchestrating. Each host gets a thin packaging layer that
+teaches it *when/how* to call the wrapper: **`SKILL.md`** for Claude Code, and a
+**`~/.codex/prompts/multivac.md` slash-prompt + `AGENTS.md` snippet** for Codex. Installs
+from a public repo with no `pip`/`npm` step.
 
 Named after Asimov's Multivac — the great computer you bring every question to.
 
 ## Goals
 
-1. Synchronous (blocking) invocation of another CLI, returning its clean final answer.
-2. Three explicit safety modes: `plan` (read-only, default), `edit`, `full`.
-3. Guaranteed subscription auth — never fall back to API keys or non-OAuth paths.
-4. Cross-CLI **consensus** (fan the same prompt to N tools in parallel).
-5. **Resume** a prior delegate conversation across turns via named session labels.
-6. `doctor` self-check that proves which CLIs are installed and logged in.
-7. Trivial public install; stdlib-only; unit-tested core logic.
+1. **Orchestrator-agnostic**: drive delegates from either Claude Code *or* Codex as host
+   (when Codex hosts, Claude Code is itself a delegate — the "claude inside codex" case).
+2. Synchronous (blocking) invocation of another CLI, returning its clean final answer.
+3. **Message** a delegate across turns: `ask --session <label>` sends a follow-up into a
+   resumable conversation (first message creates it).
+4. **Subagents**: run a delegate as a named agent (`--agent`) or an inline ad-hoc agent
+   definition (`--agents`), passed through where supported, emulated where not.
+5. Three explicit safety modes: `plan` (read-only, default), `edit`, `full`.
+6. Guaranteed subscription auth — never fall back to API keys or non-OAuth paths.
+7. Cross-CLI **consensus** (fan the same prompt to N tools in parallel).
+8. `doctor` self-check that proves which CLIs are installed and logged in.
+9. Trivial public install; stdlib-only; unit-tested core logic.
 
 ## Non-goals
 
@@ -42,8 +50,26 @@ Named after Asimov's Multivac — the great computer you bring every question to
 Closest existing tools: **dispatch** (sparkling-skills; codex + agy, no API keys, resume,
 fan-out), **clink** in PAL MCP (subprocess subagents on native auth), **Counselors**
 (parallel consensus across installed CLIs). **Gap:** no single tool covers our exact four
-(**codex + agy + claude + grok**) on pure subscription auth in one lightweight skill; grok
-and agy-as-Gemini are barely covered. multivac fills exactly that gap.
+(**codex + agy + claude + grok**) on pure subscription auth, driven from **either Claude
+Code or Codex as host**, with subagent targeting, in one lightweight skill; grok and
+agy-as-Gemini are barely covered. multivac fills exactly that gap.
+
+## Hosts / orchestrators (dual, first-class)
+
+The wrapper is caller-agnostic — it does not care who invokes it. Each host gets a thin
+packaging layer that points at the same `bin/multivac.py`:
+
+| Host | How it learns multivac | Invocation |
+|---|---|---|
+| **Claude Code** | `SKILL.md` (installed to `~/.claude/skills/multivac/` or as a plugin) | Claude runs `multivac.py …` via its Bash tool |
+| **Codex** | `~/.codex/prompts/multivac.md` (custom slash-prompt) **+** an `AGENTS.md` snippet users paste into `~/.codex/AGENTS.md` or a project `AGENTS.md` | Codex runs `multivac.py …` via its shell tool |
+
+- **Delegate roster excludes the host by convention.** If Claude Code hosts, it delegates
+  to `codex`/`agy`/`grok`; if Codex hosts, it delegates to `claude`/`agy`/`grok`. The host
+  is auto-detected from the `MULTIVAC_HOST` env var (set by each packaging layer) so
+  `consensus --tools all` and `doctor` skip the host. Self-invocation is allowed but warned.
+- Both packaging layers are generated from a **single source of usage guidance** so they
+  never drift; the Codex prompt and the SKILL.md share the same command reference.
 
 ## The four CLIs (verified on target machine, subscription auth)
 
@@ -79,34 +105,42 @@ non-empty guard is retained defensively).
 
 ```
 multi-cli-skill/
-├── README.md                 # install + usage for other users
-├── SKILL.md                  # when/how Claude invokes multivac
-├── bin/multivac.py           # the wrapper (Python 3 stdlib only)
+├── README.md                    # install + usage for both hosts
+├── SKILL.md                     # Claude Code host: when/how to invoke multivac
+├── codex/
+│   ├── prompts/multivac.md      # install to ~/.codex/prompts/ (Codex slash-prompt)
+│   └── AGENTS.snippet.md        # paste into ~/.codex/AGENTS.md or a project AGENTS.md
+├── bin/multivac.py              # the wrapper (Python 3 stdlib only)
 ├── references/
-│   ├── cli-matrix.md         # per-CLI flag table — source of truth
-│   └── gotchas.md            # agy stdout bug, timeouts, trusted dirs, auth
-├── tests/test_multivac.py    # flag-mapping + session logic (subprocess mocked)
+│   ├── usage.md                 # single source of usage guidance (SKILL.md + codex share)
+│   ├── cli-matrix.md            # per-CLI flag table — source of truth
+│   └── gotchas.md               # agy stdout/session, timeouts, trusted dirs, auth
+├── tests/test_multivac.py       # flag-mapping + session + subagent logic (subprocess mocked)
 └── LICENSE
 ```
 
-`SKILL.md` carries usage guidance and defers mechanics to `multivac.py`. The wrapper is
-the single source of correct behavior so Claude does not re-derive flags each call.
+Both host layers carry usage guidance (generated from `references/usage.md`) and defer
+mechanics to `multivac.py`. The wrapper is the single source of correct behavior so neither
+host re-derives flags each call.
 
 ## Component: `bin/multivac.py`
 
 One CLI, four subcommands.
 
-### `ask` — one delegate, one turn
+### `ask` — one delegate, one turn (or one message into a session)
 ```
 multivac.py ask --tool codex|agy|claude|grok \
   (--prompt "..." | --prompt-file PATH) \
   [--mode plan|edit|full]      # default: plan
+  [--agent NAME]               # run delegate as a named subagent (passthrough/emulated)
+  [--agents JSON|@FILE]        # inline ad-hoc subagent definition for this call
   [--model NAME] [--cwd DIR] [--timeout SECS] \
-  [--session LABEL]            # resume if label exists for this tool, else start+record
+  [--session LABEL]            # send into an existing thread (resume), else start+record
   [--json]                     # emit full metadata instead of just the answer
   [--allow-api-keys]           # opt out of env scrubbing (default: scrub)
 ```
 Blocks until the delegate finishes; prints the clean final message (or structured JSON).
+Sending a follow-up **message** to a delegate is just `ask --session <label>` again.
 
 ### `consensus` — many delegates, same prompt, parallel
 ```
@@ -136,6 +170,35 @@ Default `plan`. Write modes are explicit per call.
 Exact per-CLI flag strings are pinned in `references/cli-matrix.md` and asserted by tests;
 any flag not confirmed against the installed CLI version at build time is verified before
 first use, not assumed.
+
+## Subagents (`--agent` / `--agents`)
+
+Two ways to run a delegate as a specialized subagent instead of a bare prompt:
+
+- `--agent NAME` — run the delegate as a pre-defined named agent (e.g. `security-reviewer`).
+- `--agents JSON|@FILE` — define an ad-hoc agent inline for this one call. Canonical shape:
+  `{"name","description","prompt"(system prompt),"tools"?}` (matches Claude/Grok's own
+  `--agents` JSON so it passes straight through).
+
+Support differs per delegate (verified against installed CLIs):
+
+| Delegate | `--agent NAME` | `--agents JSON` (inline) | Mechanism |
+|---|---|---|---|
+| `claude` | ✅ passthrough `--agent` | ✅ passthrough `--agents` | native |
+| `grok` | ✅ passthrough `--agent` | ✅ passthrough `--agents` | native |
+| `agy` | ✅ passthrough `--agent` | ⚠️ no inline flag | named native; inline **emulated** |
+| `codex` | ⚠️ no agent flag | ⚠️ no agent flag | both **emulated** |
+
+**Emulation** (agy inline, codex both): multivac folds the agent's `prompt` (system prompt)
+into a preamble prepended to the delegated prompt — "You are acting as the `<name>` agent.
+<system prompt>. Task: <prompt>." A named `--agent` with no local definition on an
+emulated delegate is an error with guidance (define it inline or via the local registry).
+Delegates that spawn their **own** internal subagents mid-task (claude, grok, agy) are left
+free to do so in `edit`/`full`; multivac never passes `--no-subagents` unless asked.
+
+Optional local agent registry: `--agent NAME` may resolve from `references/agents/<name>.json`
+so the same named agent works across all delegates (passed through natively where supported,
+emulated where not). This keeps "run the security-reviewer" identical regardless of delegate.
 
 ## Subscription-auth guarantee
 
@@ -192,10 +255,13 @@ auditable. Principles, in priority order:
    not honor-system. grok/claude/agy `plan` modes are enforced by each CLI's own permission
    layer (strong, but not a kernel sandbox). This difference is documented, not hidden.
    multivac never silently escalates; `edit`/`full` are explicit per call.
-2. **`full` is quarantined.** `--mode full` maps to the `--dangerously-*` bypass flags. It
-   is never a default, requires the literal `full`, prints a one-line stderr warning naming
-   the tool and cwd, and `SKILL.md` forbids Claude from selecting it without the user's
-   clear, specific intent.
+2. **`full` is quarantined behind an explicit ack.** `--mode full` maps to the
+   `--dangerously-*` bypass flags. It is never a default and requires the literal `full`
+   **plus** an explicit acknowledgement — `--yes` or `MULTIVAC_ALLOW_FULL=1` — or the wrapper
+   refuses and explains (an interactive confirm can't work in a headless call, so the gate is
+   an explicit flag, not a prompt). It prints a one-line stderr warning naming the tool and
+   cwd. Both host layers (`SKILL.md`, Codex prompt) forbid selecting `full` without the
+   user's clear, specific intent.
 3. **No shell string interpolation.** The wrapper builds argv as a list and never uses
    `shell=True`. The prompt is passed as a single argv element (or via stdin / `--prompt-file`),
    so nothing in the prompt can be reinterpreted as a shell command.
