@@ -36,3 +36,22 @@ def test_no_short_flags_leak_for_non_codex():
     for tool in ("claude", "grok", "agy"):
         for mode in mv.MODES:
             assert all(not (f.startswith("-") and not f.startswith("--")) for f in mv.mode_flags(tool, mode))
+
+def test_build_env_scrubs_keys_and_sets_depth():
+    base = {"PATH": "/usr/bin", "ANTHROPIC_API_KEY": "sk-x", "OPENAI_API_KEY": "sk-y",
+            "HOME": "/home/u", "CLAUDECODE": "1", "MULTIVAC_DEPTH": "0"}
+    env = mv.build_env("codex", allow_api_keys=False, depth=0, base=base)
+    assert "ANTHROPIC_API_KEY" not in env and "OPENAI_API_KEY" not in env
+    assert env["PATH"] == "/usr/bin" and env["HOME"] == "/home/u"
+    assert env["MULTIVAC_DEPTH"] == "1"          # incremented for the child
+
+def test_build_env_allow_api_keys_keeps_them():
+    base = {"PATH": "/usr/bin", "XAI_API_KEY": "k"}
+    env = mv.build_env("grok", allow_api_keys=True, depth=0, base=base)
+    assert env["XAI_API_KEY"] == "k"
+
+def test_build_env_isolates_tmp_for_claude():
+    base = {"PATH": "/usr/bin", "HOME": "/home/u", "CLAUDECODE": "1"}
+    env = mv.build_env("claude", base=base)
+    assert "CLAUDE_CODE_TMPDIR" in env and env["CLAUDE_CODE_TMPDIR"]
+    assert "CLAUDECODE" not in env            # nesting marker cleared for claude delegate

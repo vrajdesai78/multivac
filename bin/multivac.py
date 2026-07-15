@@ -76,6 +76,30 @@ def mode_flags(tool: str, mode: str, *, resume: bool = False) -> list:
     return list(spec["mode"][mode])
 
 
+# Env vars always allowed through to children (allow-list, not os.environ wholesale).
+_ENV_ALLOW = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
+    "CODEX_HOME", "GROK_HOME", "MULTIVAC_HOME", "MULTIVAC_ALLOW_FULL",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+}
+
+
+def build_env(tool: str, *, allow_api_keys: bool = False, depth: int = 0, base=None) -> dict:
+    src = dict(os.environ if base is None else base)
+    env = {k: v for k, v in src.items() if k in _ENV_ALLOW}
+    if allow_api_keys:
+        for k in API_KEYS:
+            if k in src:
+                env[k] = src[k]
+    env["MULTIVAC_DEPTH"] = str(depth + 1)
+    if tool == "claude":
+        # Prevent a nested claude from purging the parent's /tmp/claude-<uid>/tasks.
+        env.pop("CLAUDECODE", None)
+        env["CLAUDE_CODE_TMPDIR"] = tempfile.mkdtemp(prefix="multivac-claude-")
+    return env
+
+
 @dataclass
 class Result:
     tool: str
