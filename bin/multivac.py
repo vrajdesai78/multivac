@@ -82,7 +82,40 @@ def _web_flags(tool, on):
     return {"codex": ["-c", "tools.web_search=true"], "grok": [], "claude": [], "agy": []}[tool]
 
 
-def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None):
+def _agents_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "references" / "agents"
+
+
+def resolve_agent(req: Req):
+    if req.agents:
+        raw = req.agents
+        if raw.startswith("@"):
+            raw = Path(raw[1:]).read_text()
+        return json.loads(raw)
+    if req.agent:
+        f = _agents_dir() / f"{req.agent}.json"
+        if f.exists():
+            return json.loads(f.read_text())
+        return {"name": req.agent, "prompt": ""}   # native tools may know it; emulated will no-op
+    return None
+
+
+def apply_subagent(tool: str, argv: list, prompt: str, agent_def):
+    if not agent_def:
+        return argv, prompt
+    sysprompt = (agent_def.get("prompt") or "").strip()
+    name = agent_def.get("name", "agent")
+    if tool == "claude" and sysprompt:
+        return argv + ["--append-system-prompt", sysprompt], prompt
+    if tool == "grok" and sysprompt:
+        return argv + ["--system-prompt-override", sysprompt], prompt
+    # emulate (agy, codex): fold into prompt preamble
+    if sysprompt:
+        prompt = f"You are acting as the `{name}` agent. {sysprompt}\n\nTask: {prompt}"
+    return argv, prompt
+
+
+def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None, agent_def=None):
     """Return (argv, planned_session_id). Prompt is the final positional arg."""
     tool = req.tool
     resume = session_id is not None
@@ -129,7 +162,9 @@ def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None):
         if req.model:
             argv += ["--model", req.model]
 
-    argv.append(prompt if prompt is not None else req.prompt)
+    prompt = prompt if prompt is not None else req.prompt
+    argv, prompt = apply_subagent(tool, argv, prompt, agent_def)
+    argv.append(prompt)
     return argv, planned
 
 

@@ -165,3 +165,28 @@ def test_build_argv_grok_resume_uses_resume_flag():
 def test_build_argv_agy_prompt_and_websearch():
     argv, _ = mv.build_argv(mv.Req(tool="agy", prompt="p", cwd="/repo", web_search=True), prompt="p")
     assert "-p" in argv and argv[-1] == "p" and "--mode" in argv
+
+
+def test_apply_subagent_native_claude():
+    agent = {"name": "reviewer", "prompt": "Be critical."}
+    argv, prompt = mv.apply_subagent("claude", ["claude", "--print"], "review x", agent)
+    assert "--append-system-prompt" in argv
+    assert argv[argv.index("--append-system-prompt") + 1] == "Be critical."
+    assert prompt == "review x"
+
+def test_apply_subagent_native_grok():
+    agent = {"name": "reviewer", "prompt": "Be critical."}
+    argv, prompt = mv.apply_subagent("grok", ["grok", "--print"], "review x", agent)
+    assert "--system-prompt-override" in argv
+
+def test_apply_subagent_emulated_codex_preamble():
+    agent = {"name": "reviewer", "prompt": "Be critical."}
+    argv, prompt = mv.apply_subagent("codex", ["codex", "exec"], "review x", agent)
+    assert argv == ["codex", "exec"]                    # no flag added
+    assert prompt.startswith("You are acting as the `reviewer` agent.")
+    assert "Be critical." in prompt and "review x" in prompt
+
+def test_resolve_agent_named(tmp_path, monkeypatch):
+    r = mv.Req(tool="codex", prompt="x", agent="reviewer")
+    a = mv.resolve_agent(r)
+    assert a["name"] == "reviewer" and "reviewer" in a["prompt"].lower()
