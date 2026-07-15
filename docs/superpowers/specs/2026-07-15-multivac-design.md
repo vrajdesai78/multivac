@@ -54,8 +54,26 @@ and agy-as-Gemini are barely covered. multivac fills exactly that gap.
 | `claude` | `claude -p "P"` | macOS keychain OAuth (Claude Max) | `--output-format json` | `--resume <id>` / `-c` |
 | `grok` | `grok -p "P"` | `~/.grok/auth.json` (x.ai OAuth) | `--output-format json`, `--json-schema` | `--resume <id>` / `-c` |
 
-All four smoke-tested returning correct output on their existing logins (CODEX_OK,
-CLAUDE_OK, grok OK, agy `models` lists Gemini/Claude/GPT-OSS).
+### Verified invocation templates (tested end-to-end on target machine)
+
+Answer + session-id extraction differs per tool — the adapter must special-case each:
+
+| Tool | Answer field | Session-id field | Resume command (verified) |
+|---|---|---|---|
+| `codex` | JSONL `item.completed` where `item.type=="agent_message"` → `.item.text` | JSONL `thread.started.thread_id` | `codex exec resume <id> --skip-git-repo-check -c sandbox_mode="read-only" --json "P"` |
+| `claude` | `.result` | `.session_id` | `claude -p --resume <id> --output-format json "P"` |
+| `grok` | `.text` | `.sessionId` (camelCase, UUIDv7) | `grok -p --resume <id> --output-format json "P"` |
+| `agy` | plain stdout (trim) | — (none exposed) | `agy -p -c "P"` (continue-most-recent; best-effort) |
+
+**Critical quirk:** `codex exec resume` does **not** accept `-s/--sandbox` (only the initial
+`codex exec` does). On resume the sandbox is set via `-c sandbox_mode="<mode>"` config
+override, or `--dangerously-bypass-approvals-and-sandbox` for `full`. Verified: passing `-s`
+to resume errors with `unexpected argument '-s'`.
+
+All four smoke-tested end-to-end: a first `ask` (6×7 → "42") and a `resume` (×2 → "84")
+each returned correct results on their existing subscription logins. agy `-p` returned clean
+stdout non-TTY in v1.1.2 (the documented stdout-drop bug did not reproduce, but the
+non-empty guard is retained defensively).
 
 ## Architecture
 
@@ -160,13 +178,57 @@ first use, not assumed.
 - One env-gated live smoke test (`MULTIVAC_LIVE=1`): `doctor` + a real `plan` `ask` per
   installed CLI, asserting a known token round-trips.
 
-## Known risks
+## Security model
 
-1. **agy headless fragility** — `-p` stdout-drop under non-TTY and no clean session id.
-   Mitigated by non-empty check + PTY retry and `-c` resume fallback; documented in gotchas.
-2. **CLI flag drift** — these CLIs move fast; flags may change across versions.
-   `cli-matrix.md` is the single source of truth and `doctor` can flag a mismatch.
-3. **Trusted-directory prompts** — some CLIs refuse to act in an untrusted dir headlessly.
-   Handled per tool in `cli-matrix.md` (e.g. pass the appropriate trust/skip flag).
-4. **Long-running delegates** — mitigated by per-tool timeouts and the blocking contract
+Because the delegates are agentic CLIs that can execute shell commands, edit files, and
+reach the network, **multivac is a privilege-delegation tool** — its security is about
+containing that delegation. This matters more than usual because the intended distribution
+is *install locally and review the source*, so the wrapper must be small, boring, and
+auditable. Principles, in priority order:
+
+1. **Read-only by default, with verified enforcement.** Default mode `plan` maps to each
+   CLI's strongest read-only setting. Empirically, `codex -s read-only` is **OS-sandbox
+   enforced**: a write attempt returns `operation not permitted` and no file is created —
+   not honor-system. grok/claude/agy `plan` modes are enforced by each CLI's own permission
+   layer (strong, but not a kernel sandbox). This difference is documented, not hidden.
+   multivac never silently escalates; `edit`/`full` are explicit per call.
+2. **`full` is quarantined.** `--mode full` maps to the `--dangerously-*` bypass flags. It
+   is never a default, requires the literal `full`, prints a one-line stderr warning naming
+   the tool and cwd, and `SKILL.md` forbids Claude from selecting it without the user's
+   clear, specific intent.
+3. **No shell string interpolation.** The wrapper builds argv as a list and never uses
+   `shell=True`. The prompt is passed as a single argv element (or via stdin / `--prompt-file`),
+   so nothing in the prompt can be reinterpreted as a shell command.
+4. **Session labels can't traverse the filesystem.** Labels are JSON object keys inside one
+   state file, never path components; still validated to `[A-Za-z0-9._-]{1,64}`.
+5. **Subscription-auth scrubbing** (also a security property). The five provider API-key env
+   vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`,
+   `GOOGLE_API_KEY`) are removed from every child unless `--allow-api-keys`, and `--bare` /
+   `--oss` are banned — so a call cannot silently switch to a different billed identity.
+   Each delegate still reads its **own** on-disk OAuth (`~/.codex/auth.json`, etc.);
+   multivac neither reads nor forwards those.
+6. **Blast-radius controls.** Per-tool timeouts (child killed on expiry), optional `--cwd`
+   to scope the delegate's working root, and `.multivac/` state written `chmod 600`.
+7. **Auditable by construction.** One file, Python stdlib only (no third-party code to vet),
+   no network calls of its own, no telemetry, no auto-update, and it never `eval`/`exec`s
+   model output — it only relays text. A "what this does / does NOT do" block sits at the
+   top of the script and README.
+
+### Residual risk (documented, not solved)
+A delegate run in `edit`/`full` on **untrusted input** can be prompt-injected into
+destructive or exfiltrating actions — inherent to delegating to an agent that has its own
+credentials and filesystem access. Mitigations: read-only default, `--cwd` scoping, and
+`SKILL.md` guidance to keep untrusted-content tasks in `plan`. multivac reduces blast radius;
+it cannot make a full-access agent safe on hostile input.
+
+## Other known risks
+
+1. **agy headless fragility** — no session id in `-p`; resume is best-effort via `-c`.
+   Non-empty stdout guard retained against the documented (non-reproduced in v1.1.2)
+   stdout-drop bug.
+2. **CLI flag drift** — these CLIs move fast. `cli-matrix.md` is the single source of truth;
+   `doctor` flags a version/flag mismatch before it bites.
+3. **Trusted-directory prompts** — some CLIs refuse to act in an untrusted dir headlessly
+   (verified: `gemini` did; handled per tool in `cli-matrix.md` via the right trust/skip flag).
+4. **Long-running delegates** — bounded by per-tool timeouts and the blocking contract
    (Claude waits; the user can interrupt).
