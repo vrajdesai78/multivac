@@ -15,3 +15,24 @@ def test_constants_and_parser():
 def test_req_defaults():
     r = mv.Req(tool="grok", prompt="x")
     assert r.mode == "plan" and r.max_depth == 2 and r.allow_api_keys is False
+
+def test_mode_flags_first_call():
+    assert mv.mode_flags("codex", "plan") == ["-s", "read-only"]
+    assert mv.mode_flags("codex", "edit") == ["-s", "workspace-write", "--ask-for-approval", "never"]
+    assert mv.mode_flags("codex", "full") == ["--dangerously-bypass-approvals-and-sandbox"]
+    assert mv.mode_flags("claude", "plan") == ["--permission-mode", "plan"]
+    assert mv.mode_flags("grok", "full") == ["--permission-mode", "bypassPermissions"]
+    assert mv.mode_flags("agy", "edit") == ["--mode", "accept-edits"]
+
+def test_codex_resume_uses_config_not_dash_s():
+    # codex exec resume rejects -s; sandbox must go via -c config override
+    plan = mv.mode_flags("codex", "plan", resume=True)
+    assert "-s" not in plan
+    assert plan == ["-c", 'sandbox_mode="read-only"']
+    assert mv.mode_flags("codex", "full", resume=True) == ["--dangerously-bypass-approvals-and-sandbox"]
+
+def test_no_short_flags_leak_for_non_codex():
+    # long flags only for claude/grok/agy generated argv
+    for tool in ("claude", "grok", "agy"):
+        for mode in mv.MODES:
+            assert all(not (f.startswith("-") and not f.startswith("--")) for f in mv.mode_flags(tool, mode))

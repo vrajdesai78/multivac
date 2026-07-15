@@ -37,6 +37,45 @@ class Req:
     max_depth: int = 2
 
 
+SPECS = {
+    "codex": {
+        "bin": "codex",
+        "framing": "ndjson",
+        "answer": None,            # parsed from agent_message items
+        "session": None,           # parsed from thread.started
+        "mode": {
+            "plan": ["-s", "read-only"],
+            "edit": ["-s", "workspace-write", "--ask-for-approval", "never"],
+            "full": ["--dangerously-bypass-approvals-and-sandbox"],
+        },
+        "mode_resume": {           # codex exec resume rejects -s
+            "plan": ["-c", 'sandbox_mode="read-only"'],
+            "edit": ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"'],
+            "full": ["--dangerously-bypass-approvals-and-sandbox"],
+        },
+    },
+    "agy": {
+        "bin": "agy", "framing": "plain", "answer": None, "session": None,
+        "mode": {"plan": ["--mode", "plan"], "edit": ["--mode", "accept-edits"], "full": ["--dangerously-skip-permissions"]},
+    },
+    "claude": {
+        "bin": "claude", "framing": "json", "answer": "result", "session": "session_id",
+        "mode": {"plan": ["--permission-mode", "plan"], "edit": ["--permission-mode", "acceptEdits"], "full": ["--permission-mode", "bypassPermissions"]},
+    },
+    "grok": {
+        "bin": "grok", "framing": "json", "answer": "text", "session": "sessionId",
+        "mode": {"plan": ["--permission-mode", "plan"], "edit": ["--permission-mode", "acceptEdits"], "full": ["--permission-mode", "bypassPermissions"]},
+    },
+}
+
+
+def mode_flags(tool: str, mode: str, *, resume: bool = False) -> list:
+    spec = SPECS[tool]
+    if resume and "mode_resume" in spec:
+        return list(spec["mode_resume"][mode])
+    return list(spec["mode"][mode])
+
+
 @dataclass
 class Result:
     tool: str
