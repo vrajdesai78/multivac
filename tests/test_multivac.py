@@ -55,3 +55,27 @@ def test_build_env_isolates_tmp_for_claude():
     env = mv.build_env("claude", base=base)
     assert "CLAUDE_CODE_TMPDIR" in env and env["CLAUDE_CODE_TMPDIR"]
     assert "CLAUDECODE" not in env            # nesting marker cleared for claude delegate
+
+
+import sys as _sys
+
+def test_run_child_splits_streams_and_stdin_devnull():
+    code, out, err, to = mv.run_child(
+        [_sys.executable, "-c", "import sys; print('OUT'); print('ERR', file=sys.stderr); sys.exit(0)"],
+        cwd=".", env={"PATH": mv.os.environ["PATH"]}, timeout=30)
+    assert code == 0 and to is False
+    assert out.strip() == "OUT" and err.strip() == "ERR"   # not merged
+
+def test_run_child_does_not_hang_on_missing_stdin():
+    # A child that reads stdin must get EOF immediately (DEVNULL), not hang.
+    code, out, err, to = mv.run_child(
+        [_sys.executable, "-c", "import sys; d=sys.stdin.read(); print('READ', len(d))"],
+        cwd=".", env={"PATH": mv.os.environ["PATH"]}, timeout=10)
+    assert to is False and out.strip() == "READ 0"
+
+def test_run_child_times_out_and_kills_group():
+    t0 = mv.time.time()
+    code, out, err, to = mv.run_child(
+        [_sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=".", env={"PATH": mv.os.environ["PATH"]}, timeout=1)
+    assert to is True and (mv.time.time() - t0) < 10

@@ -100,6 +100,27 @@ def build_env(tool: str, *, allow_api_keys: bool = False, depth: int = 0, base=N
     return env
 
 
+def run_child(argv, *, cwd, env, timeout, stdin_data=None):
+    """Execution contract: own stdin, split streams, new process group, killpg on timeout."""
+    stdin = subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL
+    proc = subprocess.Popen(
+        argv, cwd=cwd, env=env,
+        stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,   # new process group -> killpg
+    )
+    timed_out = False
+    try:
+        out, err = proc.communicate(input=stdin_data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        out, err = proc.communicate()
+    return (None if timed_out else proc.returncode, out or "", err or "", timed_out)
+
+
 @dataclass
 class Result:
     tool: str
