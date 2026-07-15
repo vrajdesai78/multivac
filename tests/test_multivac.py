@@ -136,3 +136,32 @@ def test_session_store_rejects_bad_label(tmp_path):
     st = mv.SessionStore(tmp_path)
     with pytest.raises(ValueError):
         st.put("../evil", "codex", "/repo", "x")
+
+
+def test_build_argv_codex_first_call():
+    argv, planned = mv.build_argv(mv.Req(tool="codex", prompt="hi", cwd="/repo"), prompt="hi")
+    assert argv[:2] == ["codex", "exec"]
+    assert "--skip-git-repo-check" in argv and "--json" in argv
+    assert "-s" in argv and "read-only" in argv
+    assert argv[-1] == "hi"
+
+def test_build_argv_codex_resume():
+    argv, _ = mv.build_argv(mv.Req(tool="codex", prompt="more", cwd="/repo"), session_id="TID", prompt="more")
+    assert argv[:3] == ["codex", "exec", "resume"] and "TID" in argv
+    assert "-s" not in argv and '-c' in argv          # sandbox via config on resume
+    assert argv[-1] == "more"
+
+def test_build_argv_claude_generates_session_id():
+    r = mv.Req(tool="claude", prompt="hi", cwd="/repo")
+    argv, planned = mv.build_argv(r, new_session_id="11111111-1111-4111-8111-111111111111", prompt="hi")
+    assert "--print" in argv and ["--output-format", "json"] == argv[argv.index("--output-format"):argv.index("--output-format")+2]
+    assert "--session-id" in argv and planned == "11111111-1111-4111-8111-111111111111"
+    assert "--permission-mode" in argv and argv[-1] == "hi"
+
+def test_build_argv_grok_resume_uses_resume_flag():
+    argv, _ = mv.build_argv(mv.Req(tool="grok", prompt="x", cwd="/repo"), session_id="SID", prompt="x")
+    assert "--resume" in argv and "SID" in argv and "-s" not in argv
+
+def test_build_argv_agy_prompt_and_websearch():
+    argv, _ = mv.build_argv(mv.Req(tool="agy", prompt="p", cwd="/repo", web_search=True), prompt="p")
+    assert "-p" in argv and argv[-1] == "p" and "--mode" in argv

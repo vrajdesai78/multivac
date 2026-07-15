@@ -76,6 +76,63 @@ def mode_flags(tool: str, mode: str, *, resume: bool = False) -> list:
     return list(spec["mode"][mode])
 
 
+def _web_flags(tool, on):
+    if not on:
+        return ["--disable-web-search"] if tool == "grok" else []
+    return {"codex": ["-c", "tools.web_search=true"], "grok": [], "claude": [], "agy": []}[tool]
+
+
+def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None):
+    """Return (argv, planned_session_id). Prompt is the final positional arg."""
+    tool = req.tool
+    resume = session_id is not None
+    argv = []
+    planned = session_id
+
+    if tool == "codex":
+        argv = ["codex", "exec"]
+        if resume:
+            argv += ["resume", session_id]
+        argv += ["--skip-git-repo-check", "--json"]
+        argv += mode_flags("codex", req.mode, resume=resume)
+        if req.model:
+            argv += ["--model", req.model]
+        argv += _web_flags("codex", req.web_search)
+
+    elif tool == "claude":
+        argv = ["claude", "--print", "--output-format", "json"]
+        if resume:
+            argv += ["--resume", session_id]
+        elif new_session_id:
+            argv += ["--session-id", new_session_id]; planned = new_session_id
+        argv += mode_flags("claude", req.mode)
+        if req.model:
+            argv += ["--model", req.model]
+
+    elif tool == "grok":
+        argv = ["grok", "--print", "--output-format", "json"]
+        if resume:
+            argv += ["--resume", session_id]
+        elif new_session_id:
+            argv += ["--session-id", new_session_id]; planned = new_session_id
+        argv += ["--no-auto-update"]
+        argv += mode_flags("grok", req.mode)
+        if req.model:
+            argv += ["--model", req.model]
+        argv += _web_flags("grok", req.web_search)
+
+    elif tool == "agy":
+        argv = ["agy", "-p"]
+        if resume:
+            argv += ["-c"]                       # best-effort continue-most-recent
+        argv += mode_flags("agy", req.mode)
+        if req.model:
+            argv += ["--model", req.model]
+
+    argv.append(prompt if prompt is not None else req.prompt)
+    return argv, planned
+
+
 # Env vars always allowed through to children (allow-list, not os.environ wholesale).
 _ENV_ALLOW = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR",
