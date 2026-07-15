@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""multivac — invoke other AI coding CLIs (codex, agy, claude, grok) on their
+existing subscription logins. Single file, stdlib only.
+
+WHAT THIS DOES: builds argv for each delegate CLI, runs it as a child process
+under a strict execution contract, and relays its final text.
+WHAT THIS DOES NOT DO: it never eval/execs model output, makes no network calls
+of its own, has no telemetry, and never reads your OAuth tokens — each delegate
+uses its own on-disk login.
+"""
+from __future__ import annotations
+import argparse, json, os, re, signal, subprocess, sys, tempfile, time, uuid
+from dataclasses import dataclass
+from pathlib import Path
+
+TOOLS = ("codex", "agy", "claude", "grok")
+MODES = ("plan", "edit", "full")
+API_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
+DEFAULT_TIMEOUTS = {"codex": 180, "claude": 180, "grok": 180, "agy": 300}
+
+
+@dataclass
+class Req:
+    tool: str
+    prompt: str
+    mode: str = "plan"
+    model: "str | None" = None
+    cwd: "str | None" = None
+    session: "str | None" = None
+    agent: "str | None" = None
+    agents: "str | None" = None
+    web_search: bool = False
+    timeout: "int | None" = None
+    allow_api_keys: bool = False
+    yes: bool = False
+    as_json: bool = False
+    max_depth: int = 2
+
+
+@dataclass
+class Result:
+    tool: str
+    ok: bool
+    answer: str = ""
+    session_id: "str | None" = None
+    cwd: "str | None" = None
+    exit_code: "int | None" = None
+    duration_s: float = 0.0
+    cost_usd: "float | None" = None
+    error: "str | None" = None
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="multivac", description="Invoke other AI coding CLIs on subscription auth.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    def add_common(sp):
+        sp.add_argument("--mode", choices=MODES, default="plan")
+        sp.add_argument("--model")
+        sp.add_argument("--cwd")
+        sp.add_argument("--timeout", type=int)
+        sp.add_argument("--web-search", action="store_true")
+        sp.add_argument("--allow-api-keys", action="store_true")
+        sp.add_argument("--yes", action="store_true")
+        sp.add_argument("--json", dest="as_json", action="store_true")
+        sp.add_argument("--max-depth", type=int, default=2)
+
+    a = sub.add_parser("ask")
+    a.add_argument("--tool", choices=TOOLS, required=True)
+    g = a.add_mutually_exclusive_group(required=True)
+    g.add_argument("--prompt")
+    g.add_argument("--prompt-file")
+    a.add_argument("--session")
+    a.add_argument("--agent")
+    a.add_argument("--agents")
+    add_common(a)
+
+    c = sub.add_parser("consensus")
+    c.add_argument("--tools", required=True, help="comma list or 'all'")
+    gc = c.add_mutually_exclusive_group(required=True)
+    gc.add_argument("--prompt")
+    gc.add_argument("--prompt-file")
+    c.add_argument("--concurrency", type=int, default=3)
+    add_common(c)
+
+    sub.add_parser("doctor").add_argument("--tools", default="all")
+    sub.add_parser("sessions")
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    print(f"multivac: {args.cmd} (not yet implemented)", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
