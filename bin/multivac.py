@@ -159,6 +159,48 @@ def parse_output(tool: str, stdout: str, stderr: str):
     return ans, None, None
 
 
+_LABEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+class SessionStore:
+    def __init__(self, home: Path):
+        self.home = Path(home)
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.path = self.home / "sessions.json"
+
+    def _load(self) -> dict:
+        try:
+            return json.loads(self.path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    @staticmethod
+    def _check(label: str):
+        if not _LABEL_RE.match(label or ""):
+            raise ValueError(f"invalid session label: {label!r}")
+
+    def get(self, label, tool, cwd):
+        self._check(label)
+        rec = self._load().get(label)
+        if rec and rec.get("tool") == tool and rec.get("cwd") == os.path.abspath(cwd):
+            return rec.get("session_id")
+        return None
+
+    def put(self, label, tool, cwd, session_id):
+        self._check(label)
+        data = self._load()
+        data[label] = {"tool": tool, "cwd": os.path.abspath(cwd),
+                       "session_id": session_id, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)          # atomic
+        os.chmod(self.path, 0o600)
+
+    def all(self):
+        return self._load()
+
+
 @dataclass
 class Result:
     tool: str

@@ -104,3 +104,23 @@ def test_parse_agy_plain_and_empty_guard():
         mv.parse_output("agy", "   \n", "")          # empty output != success
     with pytest.raises(ValueError):
         mv.parse_output("codex", '{"type":"turn.started"}\n', "")   # no agent_message
+
+
+def test_session_store_roundtrip(tmp_path):
+    st = mv.SessionStore(tmp_path)
+    assert st.get("job1", "codex", "/repo") is None
+    st.put("job1", "codex", "/repo", "abc-123")
+    assert st.get("job1", "codex", "/repo") == "abc-123"
+    # wrong tool or cwd -> miss (no cross-transcript resume)
+    assert st.get("job1", "claude", "/repo") is None
+    assert st.get("job1", "codex", "/other") is None
+    # file is chmod 600
+    import stat
+    mode = (tmp_path / "sessions.json").stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+def test_session_store_rejects_bad_label(tmp_path):
+    import pytest
+    st = mv.SessionStore(tmp_path)
+    with pytest.raises(ValueError):
+        st.put("../evil", "codex", "/repo", "x")
