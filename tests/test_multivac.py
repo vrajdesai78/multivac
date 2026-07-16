@@ -190,3 +190,19 @@ def test_resolve_agent_named(tmp_path, monkeypatch):
     r = mv.Req(tool="codex", prompt="x", agent="reviewer")
     a = mv.resolve_agent(r)
     assert a["name"] == "reviewer" and "reviewer" in a["prompt"].lower()
+
+def test_resolve_agent_blocks_path_traversal():
+    r = mv.Req(tool="codex", prompt="x", agent="../../../etc/passwd")
+    try:
+        mv.resolve_agent(r)
+        assert False, "expected ValueError for path-traversal agent name"
+    except ValueError:
+        pass
+
+def test_resolve_agent_blocks_slash():
+    r = mv.Req(tool="codex", prompt="x", agent="foo/bar")
+    try:
+        mv.resolve_agent(r)
+        assert False, "expected ValueError for slash in agent name"
+    except ValueError:
+        pass

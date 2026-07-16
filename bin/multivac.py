@@ -82,6 +82,9 @@ def _web_flags(tool, on):
     return {"codex": ["-c", "tools.web_search=true"], "grok": [], "claude": [], "agy": []}[tool]
 
 
+_AGENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
 def _agents_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "references" / "agents"
 
@@ -93,6 +96,8 @@ def resolve_agent(req: Req):
             raw = Path(raw[1:]).read_text()
         return json.loads(raw)
     if req.agent:
+        if not _AGENT_RE.match(req.agent):
+            raise ValueError(f"invalid agent name: {req.agent!r} (use inline --agents JSON for custom definitions)")
         f = _agents_dir() / f"{req.agent}.json"
         if f.exists():
             return json.loads(f.read_text())
