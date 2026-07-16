@@ -1,3 +1,4 @@
 .multivac/
 __pycache__/
 *.pyc
+.superpowers/

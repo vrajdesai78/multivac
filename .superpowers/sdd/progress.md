@@ -1,1 +1,0 @@
-# multivac SDD progress ledger

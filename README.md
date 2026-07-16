@@ -61,8 +61,8 @@ You don't need all four — multivac uses whichever are installed. Run `multivac
 ## Install
 
 ```console
-git clone https://github.com/<you>/multi-cli-skill.git
-cd multi-cli-skill
+git clone https://github.com/vrajdesai78/multivac.git
+cd multivac
 ./install.sh
 ```
 
