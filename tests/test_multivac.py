@@ -261,3 +261,19 @@ def test_consensus_all_excludes_host(monkeypatch, tmp_path):
     monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path)); monkeypatch.setenv("MULTIVAC_HOST", "claude")
     tools = mv.resolve_consensus_tools("all")
     assert "claude" not in tools and set(tools) == {"codex", "agy", "grok"}
+
+
+def test_doctor_reports_installed_and_scrubbed(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    fake_which = lambda b: "/usr/bin/" + b if b in ("codex", "claude") else None
+    rows = mv.do_doctor(["codex", "grok", "claude"], which=fake_which,
+                        version_runner=lambda tool: ("0.1.0" if tool != "grok" else None))
+    by = {r["tool"]: r for r in rows}
+    assert by["codex"]["installed"] and by["grok"]["installed"] is False
+    assert "OPENAI_API_KEY" in by["codex"]["scrubbed_keys"]
+
+def test_sessions_lists(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    mv.SessionStore(tmp_path).put("j", "codex", str(tmp_path), "TID")
+    out = mv.do_sessions()
+    assert "j" in out and out["j"]["tool"] == "codex"

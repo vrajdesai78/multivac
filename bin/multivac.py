@@ -9,7 +9,7 @@ of its own, has no telemetry, and never reads your OAuth tokens — each delegat
 uses its own on-disk login.
 """
 from __future__ import annotations
-import argparse, json, os, re, signal, subprocess, sys, tempfile, time, uuid
+import argparse, json, os, re, shutil, signal, subprocess, sys, tempfile, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -413,6 +413,34 @@ def do_consensus(tools, base: Req, *, concurrency=3, asker=do_ask) -> list:
     return results
 
 
+def _version_of(tool: str):
+    try:
+        out = subprocess.run([SPECS[tool]["bin"], "--version"], capture_output=True, text=True, timeout=15,
+                             stdin=subprocess.DEVNULL)
+        return (out.stdout or out.stderr).strip().splitlines()[0] if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def do_doctor(tools, *, which=shutil.which, version_runner=None) -> list:
+    version_runner = version_runner or _version_of
+    rows = []
+    scrubbed = [k for k in API_KEYS if k in os.environ]
+    for t in tools:
+        installed = which(SPECS[t]["bin"]) is not None
+        rows.append({
+            "tool": t, "installed": installed,
+            "version": version_runner(t) if installed else None,
+            "scrubbed_keys": scrubbed,
+            "note": "" if installed else f"not found — install {t}",
+        })
+    return rows
+
+
+def do_sessions() -> dict:
+    return SessionStore(multivac_home()).all()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="multivac", description="Invoke other AI coding CLIs on subscription auth.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -490,6 +518,14 @@ def main(argv=None) -> int:
                 print(f"\n===== {r.tool} =====")
                 print(r.answer if r.ok else f"ERROR: {r.error}")
         return 0 if any(r.ok for r in results) else 1
+    if args.cmd == "doctor":
+        tools = TOOLS if args.tools == "all" else [t for t in args.tools.split(",") if t in TOOLS]
+        rows = do_doctor(list(tools))
+        print(json.dumps(rows, indent=2))
+        return 0 if all(r["installed"] for r in rows) else 1
+    if args.cmd == "sessions":
+        print(json.dumps(do_sessions(), indent=2))
+        return 0
     print(f"multivac: {args.cmd} not yet implemented", file=sys.stderr)
     return 0
 
