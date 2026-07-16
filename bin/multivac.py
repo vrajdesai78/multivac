@@ -102,7 +102,7 @@ def resolve_agent(req: Req):
         f = _agents_dir() / f"{req.agent}.json"
         if f.exists():
             return json.loads(f.read_text())
-        return {"name": req.agent, "prompt": ""}   # native tools may know it; emulated will no-op
+        raise ValueError(f"unknown agent {req.agent!r}: define references/agents/{req.agent}.json or use --agents with an inline JSON definition")
     return None
 
 
@@ -180,7 +180,7 @@ def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None, a
 _ENV_ALLOW = {
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TERM", "TMPDIR",
     "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
-    "CODEX_HOME", "GROK_HOME", "MULTIVAC_HOME", "MULTIVAC_ALLOW_FULL",
+    "CODEX_HOME", "GROK_HOME", "MULTIVAC_HOME",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
 }
 
@@ -274,6 +274,8 @@ def parse_output(tool: str, stdout: str, stderr: str):
         return answer, sid, None
     if framing == "json":                         # claude / grok
         obj = json.loads(stdout)
+        if obj.get("is_error") or (obj.get("subtype") not in (None, "success")):
+            raise ValueError(f"{tool}: delegate reported an error: {str(obj.get('result') or obj.get('text') or obj)[:200]}")
         if "structured_output" in obj:            # --json-schema path
             answer = json.dumps(obj["structured_output"])
         else:
@@ -543,33 +545,39 @@ def _emit(res: Result, as_json: bool) -> int:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if args.cmd == "ask":
-        return _emit(do_ask(_req_from_args(args)), args.as_json)
-    if args.cmd == "consensus":
-        tools = resolve_consensus_tools(args.tools)
-        if not tools:
-            print("ERROR: no valid tools", file=sys.stderr); return 1
-        base = Req(tool="_", prompt=(Path(args.prompt_file).read_text() if getattr(args, "prompt_file", None) else args.prompt),
-                   mode=args.mode, model=args.model, cwd=args.cwd, web_search=args.web_search,
-                   timeout=args.timeout, allow_api_keys=args.allow_api_keys, yes=args.yes, max_depth=args.max_depth)
-        results = do_consensus(tools, base, concurrency=args.concurrency)
-        if args.as_json:
-            print(json.dumps([r.__dict__ for r in results], indent=2))
-        else:
-            for r in results:
-                print(f"\n===== {r.tool} =====")
-                print(r.answer if r.ok else f"ERROR: {r.error}")
-        return 0 if any(r.ok for r in results) else 1
-    if args.cmd == "doctor":
-        tools = TOOLS if args.tools == "all" else [t for t in args.tools.split(",") if t in TOOLS]
-        rows = do_doctor(list(tools))
-        print(json.dumps(rows, indent=2))
-        return 0 if all(r["installed"] for r in rows) else 1
-    if args.cmd == "sessions":
-        print(json.dumps(do_sessions(), indent=2))
+    try:
+        if args.cmd == "ask":
+            return _emit(do_ask(_req_from_args(args)), args.as_json)
+        if args.cmd == "consensus":
+            tools = resolve_consensus_tools(args.tools)
+            if not tools:
+                print("ERROR: no valid tools", file=sys.stderr); return 1
+            base = Req(tool="_", prompt=(Path(args.prompt_file).read_text() if getattr(args, "prompt_file", None) else args.prompt),
+                       mode=args.mode, model=args.model, cwd=args.cwd, web_search=args.web_search,
+                       timeout=args.timeout, allow_api_keys=args.allow_api_keys, yes=args.yes, max_depth=args.max_depth)
+            results = do_consensus(tools, base, concurrency=args.concurrency)
+            if args.as_json:
+                print(json.dumps([r.__dict__ for r in results], indent=2))
+            else:
+                for r in results:
+                    print(f"\n===== {r.tool} =====")
+                    print(r.answer if r.ok else f"ERROR: {r.error}")
+            return 0 if any(r.ok for r in results) else 1
+        if args.cmd == "doctor":
+            tools = TOOLS if args.tools == "all" else [t for t in args.tools.split(",") if t in TOOLS]
+            if not tools:
+                print("ERROR: no valid tools", file=sys.stderr); return 1
+            rows = do_doctor(list(tools))
+            print(json.dumps(rows, indent=2))
+            return 0 if all(r["installed"] for r in rows) else 1
+        if args.cmd == "sessions":
+            print(json.dumps(do_sessions(), indent=2))
+            return 0
+        print(f"multivac: {args.cmd} not yet implemented", file=sys.stderr)
         return 0
-    print(f"multivac: {args.cmd} not yet implemented", file=sys.stderr)
-    return 0
+    except (ValueError, FileNotFoundError, OSError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

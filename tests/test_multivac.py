@@ -96,6 +96,20 @@ def test_parse_grok_json():
     ans, sid, cost = mv.parse_output("grok", (FX / "grok.json").read_text(), "")
     assert ans == "42" and sid == "019f65bc-3a9e-74d0-bb8c-43e09abff9a1"
 
+def test_parse_claude_json_errored_turn_at_exit0_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        mv.parse_output("claude", '{"is_error": true, "result": "boom"}', "")
+
+def test_parse_claude_json_success_still_ok():
+    ans, sid, cost = mv.parse_output("claude", '{"result":"42","session_id":"s"}', "")
+    assert ans == "42" and sid == "s"
+
+def test_parse_grok_json_error_subtype_raises():
+    import pytest
+    with pytest.raises(ValueError):
+        mv.parse_output("grok", '{"subtype": "error", "text": "boom"}', "")
+
 def test_parse_agy_plain_and_empty_guard():
     ans, sid, cost = mv.parse_output("agy", (FX / "agy.txt").read_text(), "")
     assert ans == "42" and sid is None
@@ -218,6 +232,17 @@ def test_resolve_agent_blocks_slash():
         assert False, "expected ValueError for slash in agent name"
     except ValueError:
         pass
+
+def test_resolve_agent_unknown_named_agent_raises():
+    import pytest
+    r = mv.Req(tool="codex", prompt="x", agent="nonexistent-agent")
+    with pytest.raises(ValueError):
+        mv.resolve_agent(r)
+
+def test_resolve_agent_reviewer_still_resolves():
+    r = mv.Req(tool="codex", prompt="x", agent="reviewer")
+    a = mv.resolve_agent(r)
+    assert a["name"] == "reviewer"
 
 
 def _fake_runner_factory(stdout, code=0, stderr="", timed_out=False):
@@ -370,3 +395,27 @@ def test_sessions_lists(tmp_path, monkeypatch):
     mv.SessionStore(tmp_path).put("j", "codex", str(tmp_path), "TID")
     out = mv.do_sessions()
     assert "j" in out and out["j"]["tool"] == "codex"
+
+
+def test_main_empty_prompt_returns_1_not_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    assert mv.main(["ask", "--tool", "codex", "--prompt", ""]) == 1
+
+def test_main_bad_depth_env_returns_1_not_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    monkeypatch.setenv("MULTIVAC_DEPTH", "not-a-number")
+    assert mv.main(["ask", "--tool", "codex", "--prompt", "hi"]) == 1
+
+def test_main_missing_prompt_file_returns_1_not_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    assert mv.main(["ask", "--tool", "codex", "--prompt-file", str(tmp_path / "nope.txt")]) == 1
+
+def test_main_unknown_agent_returns_1_not_traceback(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    assert mv.main(["ask", "--tool", "codex", "--prompt", "hi", "--agent", "nonexistent-agent"]) == 1
+
+def test_main_doctor_all_unrecognized_tools_returns_1():
+    assert mv.main(["doctor", "--tools", "bogus"]) == 1
+
+def test_env_allow_full_ack_not_propagated_to_children():
+    assert "MULTIVAC_ALLOW_FULL" not in mv._ENV_ALLOW
