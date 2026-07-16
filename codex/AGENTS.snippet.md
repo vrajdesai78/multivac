@@ -13,7 +13,11 @@
 ## multivac — delegate to other AI CLIs
 
 You have access to `multivac`, a wrapper that shells out to other AI coding CLIs on their own
-existing subscription/OAuth logins (no API keys). As host, your delegates are:
+existing subscription/OAuth logins (no API keys). multivac covers four CLIs total — codex,
+claude, agy, grok — but **you are codex**, so your delegates are the *other three* (you don't
+delegate to yourself). `consensus --tools all` fans out to just these three; you can still
+name `codex` explicitly (`--tools codex,claude,...`) if you ever want a separate fresh codex
+instance. Your delegates:
 
 - `claude` (Claude Code)
 - `agy` (Antigravity — fronts Gemini/Claude/GPT-OSS)

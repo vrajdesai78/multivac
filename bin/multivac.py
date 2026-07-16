@@ -87,9 +87,21 @@ _AGENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # Strip control chars from relayed delegate output: all C0 except tab(09)/newline(0a),
 # plus DEL and C1. Prevents ANSI/OSC terminal spoofing (forged attribution, clipboard hijack).
-_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# Strip ANSI/OSC escape sequences and stray control chars from relayed delegate
+# output — prevents terminal spoofing (forged consensus attribution, clipboard
+# hijack via OSC 52, hidden/overwriting text). Full sequences are removed so no
+# visible parameter residue (e.g. "[31m") is left behind; tab and newline survive.
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"          # CSI: ESC [ ... final byte
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC: ESC ] ... (BEL or ST)
+    r"|\x1b[PX^_][^\x1b]*(?:\x1b\\)?"      # DCS/SOS/PM/APC strings
+    r"|\x1b."                              # any other ESC + one char
+)
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")  # C0 (keep tab/newline), DEL, C1
 def _clean(text):
-    return _CTRL_RE.sub("", text) if isinstance(text, str) else text
+    if not isinstance(text, str):
+        return text
+    return _CTRL_RE.sub("", _ANSI_RE.sub("", text))
 
 
 def _agents_dir() -> Path:
