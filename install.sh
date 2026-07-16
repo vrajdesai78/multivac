@@ -16,7 +16,9 @@
 #
 set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# ${BASH_SOURCE[0]} is unbound when piped from curl (no script file); default to
+# empty under `set -u` so we fall through to the bootstrap clone below.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd -P)"
 CLAUDE_SKILLS_DIR="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 CODEX_PROMPTS_DIR="${CODEX_PROMPTS_DIR:-$HOME/.codex/prompts}"
 MULTIVAC_BIN_DIR="${MULTIVAC_BIN_DIR:-$HOME/.local/bin}"
