@@ -318,6 +318,78 @@ class Result:
     error: "str | None" = None
 
 
+MAX_PROMPT_BYTES = 5 * 1024 * 1024
+
+
+def multivac_home() -> Path:
+    return Path(os.environ.get("MULTIVAC_HOME", os.path.join(os.getcwd(), ".multivac")))
+
+
+def resolve_prompt(req: Req) -> str:
+    if getattr(req, "prompt", None):
+        return req.prompt
+    raise ValueError("no prompt")
+
+
+def map_error(tool, exit_code, stderr, timed_out) -> str:
+    if timed_out:
+        return f"{tool}: timed out (killed process group)"
+    tail = "\n".join((stderr or "").splitlines()[-8:])
+    low = (stderr or "").lower()
+    if "log in" in low or "login" in low or "not authenticated" in low or "unauthorized" in low:
+        return f"{tool}: not logged in — run `{tool} login` (subscription). Detail:\n{tail}"
+    if "trust" in low and ("folder" in low or "directory" in low or "workspace" in low):
+        return f"{tool}: refused (untrusted directory). Pre-trust the dir or pass the tool's trust flag.\n{tail}"
+    return f"{tool}: exit {exit_code}.\n{tail}"
+
+
+def do_ask(req: Req, *, runner=run_child) -> Result:
+    cwd = os.path.abspath(req.cwd or os.getcwd())
+    # gate: full mode
+    if req.mode == "full" and not (req.yes or os.environ.get("MULTIVAC_ALLOW_FULL") == "1"):
+        return Result(tool=req.tool, ok=False, cwd=cwd,
+                      error="mode 'full' requires --yes or MULTIVAC_ALLOW_FULL=1 (auto-approves ALL delegate actions)")
+    # gate: recursion depth
+    depth = int(os.environ.get("MULTIVAC_DEPTH", "0") or "0")
+    if depth >= req.max_depth:
+        return Result(tool=req.tool, ok=False, cwd=cwd,
+                      error=f"max recursion depth reached (MULTIVAC_DEPTH={depth} >= {req.max_depth})")
+    # gate: prompt size
+    prompt = resolve_prompt(req)
+    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        return Result(tool=req.tool, ok=False, cwd=cwd, error="prompt exceeds 5 MB; put large context in a file")
+    if req.mode == "full":
+        print(f"multivac: WARNING running {req.tool} in FULL mode (auto-approves all) in {cwd}", file=sys.stderr)
+
+    store = SessionStore(multivac_home())
+    session_id = store.get(req.session, req.tool, cwd) if req.session else None
+    new_sid = None
+    if not session_id and req.tool in ("claude", "grok"):
+        new_sid = str(uuid.uuid4())
+    agent_def = resolve_agent(req)
+    argv, planned = build_argv(req, session_id=session_id, new_session_id=new_sid, prompt=prompt, agent_def=agent_def)
+
+    env = build_env(req.tool, allow_api_keys=req.allow_api_keys, depth=depth)
+    timeout = req.timeout or DEFAULT_TIMEOUTS[req.tool]
+    t0 = time.time()
+    code, out, err, timed_out = runner(argv, cwd=cwd, env=env, timeout=timeout)
+    dur = time.time() - t0
+
+    if timed_out or (code not in (0, None) and not out.strip()):
+        return Result(tool=req.tool, ok=False, cwd=cwd, exit_code=code, duration_s=dur,
+                      error=map_error(req.tool, code, err, timed_out))
+    try:
+        answer, sid, cost = parse_output(req.tool, out, err)
+    except ValueError as e:
+        return Result(tool=req.tool, ok=False, cwd=cwd, exit_code=code, duration_s=dur,
+                      error=f"{req.tool}: {e}\n{chr(10).join(err.splitlines()[-6:])}")
+    sid = sid or planned
+    if req.session and sid:
+        store.put(req.session, req.tool, cwd, sid)
+    return Result(tool=req.tool, ok=True, answer=answer, session_id=sid, cwd=cwd,
+                  exit_code=code, duration_s=dur, cost_usd=cost)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="multivac", description="Invoke other AI coding CLIs on subscription auth.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -356,9 +428,31 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _req_from_args(args) -> Req:
+    prompt = args.prompt
+    if getattr(args, "prompt_file", None):
+        prompt = Path(args.prompt_file).read_text()
+    return Req(tool=args.tool, prompt=prompt, mode=args.mode, model=args.model, cwd=args.cwd,
+               session=getattr(args, "session", None), agent=getattr(args, "agent", None),
+               agents=getattr(args, "agents", None), web_search=args.web_search, timeout=args.timeout,
+               allow_api_keys=args.allow_api_keys, yes=args.yes, as_json=args.as_json, max_depth=args.max_depth)
+
+
+def _emit(res: Result, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(res.__dict__, indent=2))
+    elif res.ok:
+        print(res.answer)
+    else:
+        print(f"ERROR: {res.error}", file=sys.stderr)
+    return 0 if res.ok else 1
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    print(f"multivac: {args.cmd} (not yet implemented)", file=sys.stderr)
+    if args.cmd == "ask":
+        return _emit(do_ask(_req_from_args(args)), args.as_json)
+    print(f"multivac: {args.cmd} not yet implemented", file=sys.stderr)
     return 0
 
 

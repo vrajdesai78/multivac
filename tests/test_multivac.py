@@ -206,3 +206,40 @@ def test_resolve_agent_blocks_slash():
         assert False, "expected ValueError for slash in agent name"
     except ValueError:
         pass
+
+
+def _fake_runner_factory(stdout, code=0, stderr="", timed_out=False):
+    def r(argv, *, cwd, env, timeout, stdin_data=None):
+        return (None if timed_out else code, stdout, stderr, timed_out)
+    return r
+
+def test_do_ask_happy_path_claude(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    req = mv.Req(tool="claude", prompt="hi", cwd=str(tmp_path))
+    res = mv.do_ask(req, runner=_fake_runner_factory('{"type":"result","result":"42","session_id":"S1","total_cost_usd":0.01}'))
+    assert res.ok and res.answer == "42" and res.session_id == "S1"
+
+def test_do_ask_records_and_resumes_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    r1 = mv.Req(tool="claude", prompt="hi", cwd=str(tmp_path), session="job")
+    mv.do_ask(r1, runner=_fake_runner_factory('{"type":"result","result":"a","session_id":"S9"}'))
+    st = mv.SessionStore(tmp_path)
+    assert st.get("job", "claude", str(tmp_path)) is not None
+
+def test_do_ask_full_requires_ack(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path)); monkeypatch.delenv("MULTIVAC_ALLOW_FULL", raising=False)
+    req = mv.Req(tool="codex", prompt="x", cwd=str(tmp_path), mode="full", yes=False)
+    res = mv.do_ask(req, runner=_fake_runner_factory("{}"))
+    assert not res.ok and "full" in res.error.lower()
+
+def test_do_ask_depth_guard(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path)); monkeypatch.setenv("MULTIVAC_DEPTH", "2")
+    req = mv.Req(tool="grok", prompt="x", cwd=str(tmp_path), max_depth=2)
+    res = mv.do_ask(req, runner=_fake_runner_factory("{}"))
+    assert not res.ok and "depth" in res.error.lower()
+
+def test_do_ask_timeout_maps_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    req = mv.Req(tool="codex", prompt="x", cwd=str(tmp_path))
+    res = mv.do_ask(req, runner=_fake_runner_factory("", code=None, timed_out=True))
+    assert not res.ok and "timed out" in res.error.lower()
