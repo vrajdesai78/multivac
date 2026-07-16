@@ -149,19 +149,16 @@ def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None, a
             argv += ["--model", req.model]
 
     elif tool == "grok":
-        argv = ["grok", "--print", "--output-format", "json"]
+        argv = ["grok", "--output-format", "json", "--no-auto-update"]
         if resume:
             argv += ["--resume", session_id]
-        elif new_session_id:
-            argv += ["--session-id", new_session_id]; planned = new_session_id
-        argv += ["--no-auto-update"]
         argv += mode_flags("grok", req.mode)
         if req.model:
             argv += ["--model", req.model]
         argv += _web_flags("grok", req.web_search)
 
     elif tool == "agy":
-        argv = ["agy", "-p"]
+        argv = ["agy"]
         if resume:
             argv += ["-c"]                       # best-effort continue-most-recent
         argv += mode_flags("agy", req.mode)
@@ -170,7 +167,12 @@ def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None, a
 
     prompt = prompt if prompt is not None else req.prompt
     argv, prompt = apply_subagent(tool, argv, prompt, agent_def)
-    argv.append(prompt)
+    if tool == "grok":
+        argv += ["--single", prompt]   # grok: prompt is the value of -p/--single, must be last
+    elif tool == "agy":
+        argv += ["--print", prompt]    # agy: prompt is the value of -p/--print, must be last
+    else:
+        argv.append(prompt)
     return argv, planned
 
 
@@ -396,7 +398,7 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
     store = SessionStore(multivac_home())
     session_id = store.get(req.session, req.tool, cwd) if req.session else None
     new_sid = None
-    if not session_id and req.tool in ("claude", "grok"):
+    if not session_id and req.tool == "claude":
         new_sid = str(uuid.uuid4())
     agent_def = resolve_agent(req)
     argv, planned = build_argv(req, session_id=session_id, new_session_id=new_sid, prompt=prompt, agent_def=agent_def)

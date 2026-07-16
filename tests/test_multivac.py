@@ -158,13 +158,25 @@ def test_build_argv_claude_generates_session_id():
     assert "--session-id" in argv and planned == "11111111-1111-4111-8111-111111111111"
     assert "--permission-mode" in argv and argv[-1] == "hi"
 
+def test_build_argv_grok_first_call():
+    argv, planned = mv.build_argv(mv.Req(tool="grok", prompt="x", cwd="/repo"), prompt="x")
+    assert "--output-format" in argv and "json" in argv
+    assert "--no-auto-update" in argv
+    assert "--print" not in argv
+    assert "--session-id" not in argv
+    assert argv[-1] == "x" and argv[-2] == "--single"
+    assert planned is None   # grok's session id is parsed from output, not client-generated
+
 def test_build_argv_grok_resume_uses_resume_flag():
     argv, _ = mv.build_argv(mv.Req(tool="grok", prompt="x", cwd="/repo"), session_id="SID", prompt="x")
     assert "--resume" in argv and "SID" in argv and "-s" not in argv
+    assert "-c" not in argv
+    assert argv[-1] == "x" and argv[-2] == "--single"
 
 def test_build_argv_agy_prompt_and_websearch():
     argv, _ = mv.build_argv(mv.Req(tool="agy", prompt="p", cwd="/repo", web_search=True), prompt="p")
-    assert "-p" in argv and argv[-1] == "p" and "--mode" in argv
+    assert argv[-2] == "--print" and argv[-1] == "p" and "--mode" in argv
+    assert argv.index("--mode") < argv.index("--print")
 
 
 def test_apply_subagent_native_claude():
