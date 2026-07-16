@@ -4,9 +4,10 @@
   with wherever you cloned https://github.com/<org>/multi-cli-skill on this machine.
 
   Setting MULTIVAC_HOST=codex on every multivac.py call tells the wrapper that Codex is the
-  host, so `consensus --tools all` and `doctor --tools all` expand to the OTHER three CLIs
-  (claude, agy, grok) instead of including Codex itself — Codex never needs to delegate to
-  Codex.
+  host, so `consensus --tools all` fans out to the OTHER three CLIs (claude, agy, grok)
+  instead of including Codex itself — Codex never needs to delegate to Codex. `doctor`
+  always reports all four CLIs (including codex) regardless of MULTIVAC_HOST — that's
+  intentional, so you can confirm the host CLI is installed too.
 -->
 
 ## multivac — delegate to other AI CLIs
@@ -28,8 +29,9 @@ MULTIVAC_HOST=codex python3 <path-to-multi-cli-skill>/bin/multivac.py ask \
 ```
 
 Subcommands: `ask` (one delegate), `consensus` (fan out to `--tools claude,agy,grok` or
-`--tools all`), `doctor` (installed/version/scrubbed-key check, does not verify login),
-`sessions` (list resumable conversations). Full flag reference:
+`--tools all`, which excludes Codex when `MULTIVAC_HOST=codex`), `doctor` (installed/version/
+scrubbed-key check across all four CLIs, including codex, regardless of MULTIVAC_HOST — does
+not verify login), `sessions` (list resumable conversations). Full flag reference:
 `references/usage.md` in the multivac repo.
 
 Modes: `plan` (read-only, default), `edit` (delegate may write files in its own working

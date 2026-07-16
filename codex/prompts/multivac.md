@@ -5,7 +5,7 @@ argument-hint: [tool|consensus] <question or task>
 
 # multivac (Codex slash-prompt)
 
-The user invoked `/multivac $ARGUMENTS`. You are Codex, running as the **host**. multivac
+The user invoked `/prompts:multivac $ARGUMENTS`. You are Codex, running as the **host**. multivac
 lets you shell out to other AI coding CLIs — **claude**, **agy** (Antigravity, which fronts
 Gemini/Claude/GPT-OSS), and **grok** — on their own existing subscription/OAuth logins. Codex
 itself is never a delegate target here (you're already running).
@@ -20,7 +20,9 @@ itself is never a delegate target here (you're already running).
      (e.g. a Gemini-flavored question → `agy`; "what does Claude think" → `claude`); if truly
      ambiguous, ask the user which delegate before running anything.
 2. Run `multivac.py` via the shell tool, always with `MULTIVAC_HOST=codex` set on the call so
-   `--tools all`/`doctor` correctly exclude Codex itself:
+   `consensus --tools all` correctly excludes Codex itself. (`doctor` always reports all four
+   CLIs, including codex, regardless of MULTIVAC_HOST — that's intentional, so you can confirm
+   the host CLI is installed too.)
 
    ```
    MULTIVAC_HOST=codex python3 <path-to-multi-cli-skill>/bin/multivac.py ask \
@@ -73,8 +75,10 @@ MULTIVAC_HOST=codex python3 <path-to-multi-cli-skill>/bin/multivac.py ask \
 MULTIVAC_HOST=codex python3 <path-to-multi-cli-skill>/bin/multivac.py doctor
 ```
 
-`doctor` only confirms install + version + which API-key env vars would be scrubbed — it does
-not verify login; a not-logged-in delegate surfaces on the first real `ask` instead.
+`doctor` reports all four CLIs (including codex) regardless of MULTIVAC_HOST — that's
+intentional, so you can confirm the host CLI is installed too. It only confirms install +
+version + which API-key env vars would be scrubbed — it does not verify login; a not-logged-in
+delegate surfaces on the first real `ask` instead.
 
 ## Hard rules (same as the Claude Code side)
 
@@ -91,3 +95,6 @@ not verify login; a not-logged-in delegate surfaces on the first real `ask` inst
 
 See `references/usage.md` in the multivac repo for the complete flag reference (`--model`,
 `--cwd`, `--timeout`, `--agent`/`--agents` subagents, `--web-search`, `--concurrency`, etc.).
+
+_Note: OpenAI is migrating Codex "custom prompts" toward a "skills" format, so this file may
+need to move to that format in a future Codex version._
