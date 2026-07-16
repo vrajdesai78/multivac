@@ -85,6 +85,12 @@ def _web_flags(tool, on):
 
 _AGENT_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
+# Strip control chars from relayed delegate output: all C0 except tab(09)/newline(0a),
+# plus DEL and C1. Prevents ANSI/OSC terminal spoofing (forged attribution, clipboard hijack).
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+def _clean(text):
+    return _CTRL_RE.sub("", text) if isinstance(text, str) else text
+
 
 def _agents_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "references" / "agents"
@@ -94,7 +100,10 @@ def resolve_agent(req: Req):
     if req.agents:
         raw = req.agents
         if raw.startswith("@"):
-            raw = Path(raw[1:]).read_text()
+            path = raw[1:]
+            if os.path.getsize(path) > 1024 * 1024:
+                raise ValueError("--agents file too large (>1MB)")
+            raw = Path(path).read_text()
         return json.loads(raw)
     if req.agent:
         if not _AGENT_RE.match(req.agent):
@@ -185,7 +194,7 @@ _ENV_ALLOW = {
 }
 
 
-def build_env(tool: str, *, allow_api_keys: bool = False, depth: int = 0, base=None) -> dict:
+def build_env(tool: str, *, allow_api_keys: bool = False, depth: int = 0, base=None, max_depth=None) -> dict:
     src = dict(os.environ if base is None else base)
     env = {k: v for k, v in src.items() if k in _ENV_ALLOW}
     if allow_api_keys:
@@ -193,6 +202,8 @@ def build_env(tool: str, *, allow_api_keys: bool = False, depth: int = 0, base=N
             if k in src:
                 env[k] = src[k]
     env["MULTIVAC_DEPTH"] = str(depth + 1)
+    if max_depth is not None:
+        env["MULTIVAC_MAX_DEPTH"] = str(max_depth)
     if tool == "claude":
         # Prevent a nested claude from purging the parent's /tmp/claude-<uid>/tasks.
         env.pop("CLAUDECODE", None)
@@ -218,7 +229,12 @@ def run_child(argv, *, cwd, env, timeout, stdin_data=None):
         except (ProcessLookupError, PermissionError):
             proc.kill()
         out, err = proc.communicate()
-    return (None if timed_out else proc.returncode, out or "", err or "", timed_out)
+    out, err = out or "", err or ""
+    if len(out) > MAX_OUTPUT_BYTES:
+        out = out[:MAX_OUTPUT_BYTES] + "\n…[truncated by multivac]"
+    if len(err) > MAX_OUTPUT_BYTES:
+        err = err[:MAX_OUTPUT_BYTES] + "\n…[truncated by multivac]"
+    return (None if timed_out else proc.returncode, out, err, timed_out)
 
 
 def run_child_pty(argv, *, cwd, env, timeout):
@@ -231,22 +247,32 @@ def run_child_pty(argv, *, cwd, env, timeout):
         except Exception:
             os._exit(127)
     buf, deadline = [], time.time() + timeout
+    total = 0
     timed_out = False
-    while True:
-        if time.time() > deadline:
-            timed_out = True
-            try: os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except Exception: pass
-            break
-        r, _, _ = select.select([fd], [], [], 0.5)
-        if fd in r:
-            try:
-                data = os.read(fd, 4096)
-            except OSError as e:
-                if e.errno == errno.EIO: break
-                raise
-            if not data: break
-            buf.append(data.decode("utf-8", "replace"))
+    try:
+        while True:
+            if time.time() > deadline:
+                timed_out = True
+                try: os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except Exception: pass
+                break
+            r, _, _ = select.select([fd], [], [], 0.5)
+            if fd in r:
+                try:
+                    data = os.read(fd, 4096)
+                except OSError as e:
+                    if e.errno == errno.EIO: break
+                    raise
+                if not data: break
+                total += len(data)
+                buf.append(data.decode("utf-8", "replace"))
+                if total > MAX_OUTPUT_BYTES:
+                    try: os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    except Exception: pass
+                    break
+    finally:
+        try: os.close(fd)
+        except OSError: pass
     try: _, status = os.waitpid(pid, 0); code = os.waitstatus_to_exitcode(status)
     except Exception: code = None
     return (None if timed_out else code, "".join(buf), "", timed_out)
@@ -302,6 +328,8 @@ class SessionStore:
         self.path = self.home / "sessions.json"
 
     def _load(self) -> dict:
+        if self.path.is_symlink():  # refuse to follow a pre-planted symlink (exfil guard)
+            return {}
         try:
             return json.loads(self.path.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
@@ -355,6 +383,7 @@ class Result:
 
 
 MAX_PROMPT_BYTES = 5 * 1024 * 1024
+MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 
 
 def multivac_home() -> Path:
@@ -385,11 +414,19 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
     if req.mode == "full" and not (req.yes or os.environ.get("MULTIVAC_ALLOW_FULL") == "1"):
         return Result(tool=req.tool, ok=False, cwd=cwd,
                       error="mode 'full' requires --yes or MULTIVAC_ALLOW_FULL=1 (auto-approves ALL delegate actions)")
-    # gate: recursion depth
+    # gate: recursion depth (pin the ceiling so a child can only LOWER it, never raise it)
     depth = int(os.environ.get("MULTIVAC_DEPTH", "0") or "0")
-    if depth >= req.max_depth:
+    HARD_MAX_DEPTH = 8
+    env_cap = os.environ.get("MULTIVAC_MAX_DEPTH")
+    effective_max = min(req.max_depth, HARD_MAX_DEPTH)
+    if env_cap:
+        try:
+            effective_max = min(effective_max, int(env_cap))
+        except ValueError:
+            pass
+    if depth >= effective_max:
         return Result(tool=req.tool, ok=False, cwd=cwd,
-                      error=f"max recursion depth reached (MULTIVAC_DEPTH={depth} >= {req.max_depth})")
+                      error=f"max recursion depth reached (MULTIVAC_DEPTH={depth} >= {effective_max})")
     # gate: prompt size
     prompt = resolve_prompt(req)
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
@@ -405,7 +442,7 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
     agent_def = resolve_agent(req)
     argv, planned = build_argv(req, session_id=session_id, new_session_id=new_sid, prompt=prompt, agent_def=agent_def)
 
-    env = build_env(req.tool, allow_api_keys=req.allow_api_keys, depth=depth)
+    env = build_env(req.tool, allow_api_keys=req.allow_api_keys, depth=depth, max_depth=effective_max)
     timeout = req.timeout or DEFAULT_TIMEOUTS[req.tool]
     t0 = time.time()
     code, out, err, timed_out = runner(argv, cwd=cwd, env=env, timeout=timeout)
@@ -526,6 +563,8 @@ def build_parser() -> argparse.ArgumentParser:
 def _req_from_args(args) -> Req:
     prompt = args.prompt
     if getattr(args, "prompt_file", None):
+        if os.path.getsize(args.prompt_file) > MAX_PROMPT_BYTES:
+            raise ValueError("prompt-file exceeds 5 MB; put large context in a file the delegate reads")
         prompt = Path(args.prompt_file).read_text()
     return Req(tool=args.tool, prompt=prompt, mode=args.mode, model=args.model, cwd=args.cwd,
                session=getattr(args, "session", None), agent=getattr(args, "agent", None),
@@ -537,9 +576,9 @@ def _emit(res: Result, as_json: bool) -> int:
     if as_json:
         print(json.dumps(res.__dict__, indent=2))
     elif res.ok:
-        print(res.answer)
+        print(_clean(res.answer))
     else:
-        print(f"ERROR: {res.error}", file=sys.stderr)
+        print(f"ERROR: {_clean(res.error)}", file=sys.stderr)
     return 0 if res.ok else 1
 
 
@@ -561,7 +600,7 @@ def main(argv=None) -> int:
             else:
                 for r in results:
                     print(f"\n===== {r.tool} =====")
-                    print(r.answer if r.ok else f"ERROR: {r.error}")
+                    print(_clean(r.answer) if r.ok else f"ERROR: {_clean(r.error)}")
             return 0 if any(r.ok for r in results) else 1
         if args.cmd == "doctor":
             tools = TOOLS if args.tools == "all" else [t for t in args.tools.split(",") if t in TOOLS]

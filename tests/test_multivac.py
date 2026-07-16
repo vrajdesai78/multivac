@@ -419,3 +419,76 @@ def test_main_doctor_all_unrecognized_tools_returns_1():
 
 def test_env_allow_full_ack_not_propagated_to_children():
     assert "MULTIVAC_ALLOW_FULL" not in mv._ENV_ALLOW
+
+
+# --- security fixes -------------------------------------------------------
+
+def test_clean_strips_ansi_osc_and_control():
+    # ANSI SGR, OSC 52 clipboard hijack, cursor-up: every control introducer
+    # (ESC \x1b, BEL \x07, C1) is removed so no escape sequence survives for the
+    # terminal to act on; the visible text is preserved.
+    out = mv._clean("\x1b[31mred\x1b]52;c;evil\x07\x1b[1A")
+    assert "red" in out
+    assert "\x1b" not in out and "\x07" not in out
+    assert mv._CTRL_RE.search(out) is None  # no control chars remain
+
+def test_clean_preserves_newline_and_tab():
+    assert mv._clean("line1\n\ttabbed") == "line1\n\ttabbed"
+
+def test_clean_removes_carriage_return():
+    assert mv._clean("a\rb") == "ab"
+
+def test_clean_passthrough_non_str():
+    assert mv._clean(None) is None
+
+def test_max_depth_env_cap_cannot_be_raised_by_child(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    monkeypatch.setenv("MULTIVAC_MAX_DEPTH", "1")
+    monkeypatch.setenv("MULTIVAC_DEPTH", "1")
+    req = mv.Req(tool="grok", prompt="x", cwd=str(tmp_path), max_depth=9999)
+    res = mv.do_ask(req, runner=_fake_runner_factory("{}"))
+    assert not res.ok and "depth" in res.error.lower()
+
+def test_build_env_stamps_max_depth_ceiling():
+    env = mv.build_env("codex", max_depth=3, base={"PATH": "/usr/bin"})
+    assert env["MULTIVAC_MAX_DEPTH"] == "3"
+
+def test_build_env_no_max_depth_when_absent():
+    env = mv.build_env("codex", base={"PATH": "/usr/bin"})
+    assert "MULTIVAC_MAX_DEPTH" not in env
+
+def test_max_depth_env_var_not_in_env_allow():
+    assert "MULTIVAC_MAX_DEPTH" not in mv._ENV_ALLOW
+
+def test_max_output_bytes_constant_exists():
+    assert mv.MAX_OUTPUT_BYTES == 32 * 1024 * 1024
+
+def test_run_child_small_output_unaffected():
+    code, out, err, to = mv.run_child(
+        [_sys.executable, "-c", "print('x'*100)"],
+        cwd=".", env={"PATH": mv.os.environ["PATH"]}, timeout=30)
+    assert code == 0 and to is False and out.strip() == "x" * 100
+
+def test_resolve_agent_file_too_large_rejected(tmp_path):
+    big = tmp_path / "agents.json"
+    big.write_bytes(b"x" * (1024 * 1024 + 1))
+    r = mv.Req(tool="codex", prompt="x", agents="@" + str(big))
+    with pytest.raises(ValueError):
+        mv.resolve_agent(r)
+
+def test_resolve_agent_small_file_still_works(tmp_path):
+    small = tmp_path / "agents.json"
+    small.write_text('{"name":"reviewer","prompt":"Be critical."}')
+    r = mv.Req(tool="codex", prompt="x", agents="@" + str(small))
+    a = mv.resolve_agent(r)
+    assert a["name"] == "reviewer"
+
+def test_session_store_refuses_symlink(tmp_path):
+    real = tmp_path / "secret.json"
+    real.write_text('{"leaked": {"tool": "x"}}')
+    home = tmp_path / "home"
+    home.mkdir()
+    link = home / "sessions.json"
+    link.symlink_to(real)
+    st = mv.SessionStore(home)
+    assert st.all() == {}
