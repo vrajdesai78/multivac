@@ -155,6 +155,12 @@ multivac ask --tool grok --mode edit --cwd ./service --prompt "Add input validat
 # Fan the same prompt out in parallel and compare
 multivac consensus --tools codex,grok,agy --prompt "Best way to structure this module?"
 
+# ...then reconcile the answers into one, with agreements/disagreements flagged
+multivac consensus --tools codex,grok,agy --synthesize --prompt "Best way to structure this module?"
+
+# Attach specific files as read-only context (the delegate gets the exact content)
+multivac ask --tool codex --files src/parser.py,src/lexer.py --prompt "Where's the off-by-one?"
+
 # Run a delegate as a named or ad-hoc subagent
 multivac ask --tool claude --agent reviewer --prompt "Audit auth.py"
 multivac ask --tool codex --agents '{"name":"perf","prompt":"You optimize hot paths."}' --prompt "Speed up parse()"

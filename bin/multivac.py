@@ -36,6 +36,7 @@ class Req:
     yes: bool = False
     as_json: bool = False
     max_depth: int = 2
+    files: "str | None" = None      # comma-separated paths attached as read-only context
 
 
 SPECS = {
@@ -408,6 +409,35 @@ def resolve_prompt(req: Req) -> str:
     raise ValueError("no prompt")
 
 
+def attach_files(prompt: str, files_csv: str) -> str:
+    """Append the contents of comma-separated file paths to the prompt as read-only
+    context, so the delegate has the exact files regardless of what it reads on its own.
+    Per-file and total size are capped (raises ValueError, caught by main → clean error)."""
+    paths = [p.strip() for p in files_csv.split(",") if p.strip()]
+    blocks, total = [], 0
+    for p in paths:
+        try:
+            total += os.path.getsize(p)
+        except OSError as e:
+            raise ValueError(f"--files: cannot read {p}: {e}")
+        if total > MAX_PROMPT_BYTES:
+            raise ValueError("--files: attached files exceed 5 MB total")
+        blocks.append(f"### {p}\n{Path(p).read_text()}")
+    body = "\n\n".join(blocks)
+    return f"{prompt}\n\n--- Attached files (read-only context) ---\n\n{body}"
+
+
+def build_synthesis_prompt(question: str, results) -> str:
+    """Prompt for the synthesis/judge step: reconcile several delegates' answers into one."""
+    answers = "\n\n".join(f"===== {r.tool} =====\n{r.answer}" for r in results if r.ok)
+    return (
+        "Several AI assistants were asked the same question. Reconcile their answers into a "
+        "single best answer. Then add a short \"Agreements:\" line and a \"Disagreements:\" "
+        "line noting where they differed (say \"none\" if they agree).\n\n"
+        f"QUESTION:\n{question}\n\nANSWERS:\n{answers}"
+    )
+
+
 def map_error(tool, exit_code, stderr, timed_out) -> str:
     if timed_out:
         return f"{tool}: timed out (killed process group)"
@@ -441,8 +471,10 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
                       error=f"max recursion depth reached (MULTIVAC_DEPTH={depth} >= {effective_max})")
     # gate: prompt size
     prompt = resolve_prompt(req)
+    if req.files:
+        prompt = attach_files(prompt, req.files)
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-        return Result(tool=req.tool, ok=False, cwd=cwd, error="prompt exceeds 5 MB; put large context in a file")
+        return Result(tool=req.tool, ok=False, cwd=cwd, error="prompt (with --files) exceeds 5 MB; attach fewer/smaller files")
     if req.mode == "full":
         print(f"multivac: WARNING running {req.tool} in FULL mode (auto-approves all) in {cwd}", file=sys.stderr)
 
@@ -564,6 +596,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--yes", action="store_true")
         sp.add_argument("--json", dest="as_json", action="store_true")
         sp.add_argument("--max-depth", type=int, default=2)
+        sp.add_argument("--files", help="comma-separated file paths to attach as read-only context")
 
     a = sub.add_parser("ask")
     a.add_argument("--tool", choices=TOOLS, required=True)
@@ -581,6 +614,9 @@ def build_parser() -> argparse.ArgumentParser:
     gc.add_argument("--prompt")
     gc.add_argument("--prompt-file")
     c.add_argument("--concurrency", type=int, default=3)
+    c.add_argument("--synthesize", action="store_true",
+                   help="after fan-out, have one delegate reconcile the answers into one + flag disagreements")
+    c.add_argument("--judge", choices=TOOLS, help="which delegate synthesizes (default: first in --tools)")
     add_common(c)
 
     d = sub.add_parser("doctor")
@@ -599,7 +635,8 @@ def _req_from_args(args) -> Req:
     return Req(tool=args.tool, prompt=prompt, mode=args.mode, model=args.model, cwd=args.cwd,
                session=getattr(args, "session", None), agent=getattr(args, "agent", None),
                agents=getattr(args, "agents", None), web_search=args.web_search, timeout=args.timeout,
-               allow_api_keys=args.allow_api_keys, yes=args.yes, as_json=args.as_json, max_depth=args.max_depth)
+               allow_api_keys=args.allow_api_keys, yes=args.yes, as_json=args.as_json, max_depth=args.max_depth,
+               files=getattr(args, "files", None))
 
 
 def _emit(res: Result, as_json: bool) -> int:
@@ -623,14 +660,27 @@ def main(argv=None) -> int:
                 print("ERROR: no valid tools", file=sys.stderr); return 1
             base = Req(tool="_", prompt=(Path(args.prompt_file).read_text() if getattr(args, "prompt_file", None) else args.prompt),
                        mode=args.mode, model=args.model, cwd=args.cwd, web_search=args.web_search,
-                       timeout=args.timeout, allow_api_keys=args.allow_api_keys, yes=args.yes, max_depth=args.max_depth)
+                       timeout=args.timeout, allow_api_keys=args.allow_api_keys, yes=args.yes, max_depth=args.max_depth,
+                       files=getattr(args, "files", None))
             results = do_consensus(tools, base, concurrency=args.concurrency)
+            synthesis = None
+            ok_results = [r for r in results if r.ok]
+            if getattr(args, "synthesize", False) and len(ok_results) >= 2:
+                judge = args.judge if args.judge in TOOLS else ok_results[0].tool
+                synthesis = do_ask(Req(tool=judge, prompt=build_synthesis_prompt(base.prompt, ok_results),
+                                       mode="plan", cwd=args.cwd, timeout=args.timeout, max_depth=args.max_depth))
             if args.as_json:
-                print(json.dumps([r.__dict__ for r in results], indent=2))
+                out = {"results": [r.__dict__ for r in results]}
+                if synthesis is not None:
+                    out["synthesis"] = synthesis.__dict__
+                print(json.dumps(out, indent=2))
             else:
                 for r in results:
                     print(f"\n===== {r.tool} =====")
                     print(_clean(r.answer) if r.ok else f"ERROR: {_clean(r.error)}")
+                if synthesis is not None:
+                    print(f"\n===== synthesis (via {synthesis.tool}) =====")
+                    print(_clean(synthesis.answer) if synthesis.ok else f"ERROR: {_clean(synthesis.error)}")
             return 0 if any(r.ok for r in results) else 1
         if args.cmd == "doctor":
             tools = TOOLS if args.tools == "all" else [t for t in args.tools.split(",") if t in TOOLS]

@@ -499,3 +499,34 @@ def test_session_store_refuses_symlink(tmp_path):
     link.symlink_to(real)
     st = mv.SessionStore(home)
     assert st.all() == {}
+
+
+def test_attach_files_includes_content_and_path(tmp_path):
+    f = tmp_path / "code.py"; f.write_text("def foo(): return 42")
+    out = mv.attach_files("review this", str(f))
+    assert "review this" in out and "def foo(): return 42" in out and "code.py" in out
+
+def test_attach_files_missing_raises(tmp_path):
+    import pytest
+    with pytest.raises(ValueError):
+        mv.attach_files("p", str(tmp_path / "nope.py"))
+
+def test_do_ask_files_reaches_delegate_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    f = tmp_path / "c.py"; f.write_text("SECRET_MARKER=1")
+    cap = {}
+    def fake(argv, *, cwd, env, timeout, stdin_data=None):
+        cap["argv"] = argv
+        return (0, '{"type":"result","result":"ok","session_id":"s"}', "", False)
+    res = mv.do_ask(mv.Req(tool="claude", prompt="review", cwd=str(tmp_path), files=str(f)), runner=fake)
+    assert res.ok and "SECRET_MARKER=1" in " ".join(cap["argv"])
+
+def test_build_synthesis_prompt_includes_ok_answers_only():
+    rs = [mv.Result(tool="codex", ok=True, answer="AAA"),
+          mv.Result(tool="grok", ok=True, answer="BBB"),
+          mv.Result(tool="agy", ok=False, error="boom")]
+    p = mv.build_synthesis_prompt("Which is faster?", rs)
+    assert "Which is faster?" in p
+    assert "codex" in p and "AAA" in p and "grok" in p and "BBB" in p
+    assert "agy" not in p and "boom" not in p  # failed delegate excluded
+    assert "Agreements" in p and "Disagreements" in p

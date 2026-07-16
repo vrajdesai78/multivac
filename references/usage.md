@@ -43,6 +43,9 @@ Key flags:
   `exit_code`, `duration_s`, `cost_usd`, `error`) instead of the plain answer.
 - `--max-depth N` — recursion ceiling, default 2. See [Safety notes](#safety-notes).
 - `--yes` — explicit acknowledgement required for `--mode full`.
+- `--files a.py,b.py` — attach the contents of the listed files to the prompt as read-only
+  context, so the delegate gets the exact files (rather than only what it reads from `--cwd`
+  on its own). Total attached size is capped at 5 MB. Works on `ask` and `consensus`.
 
 ### `consensus` — fan the same prompt out to N delegates
 
@@ -60,8 +63,24 @@ python3 bin/multivac.py consensus --tools codex,grok --prompt "What is 6 times 7
 `--tools` is a comma list or the literal `all` (which expands to every tool except the
 current host, read from `MULTIVAC_HOST`). `--concurrency N` bounds parallel children
 (default 3 — deliberately not unbounded, to avoid tripping a provider's abuse/rate-limit
-detection). `consensus` shares every other flag with `ask` (`--mode`, `--model`, `--cwd`,
-`--timeout`, `--web-search`, `--allow-api-keys`, `--yes`, `--json`, `--max-depth`) except
+detection).
+
+**`--synthesize`** adds a reconcile step: after the fan-out, one delegate merges all the
+answers into a single best answer and flags where they agreed/disagreed (a mixture-of-agents
+step — synthesis tends to beat raw side-by-side on tricky logic). `--judge <tool>` names the
+synthesizer (default: the first tool in `--tools`). The synthesizer always runs read-only.
+
+```
+python3 bin/multivac.py consensus --tools codex,grok,agy --synthesize --prompt "..."
+# ... per-tool answers ..., then:
+===== synthesis (via codex) =====
+<one reconciled answer>
+Agreements: ...
+Disagreements: ...
+```
+
+`consensus` shares every other flag with `ask` (`--mode`, `--model`, `--cwd`, `--timeout`,
+`--web-search`, `--files`, `--allow-api-keys`, `--yes`, `--json`, `--max-depth`) except
 `--session`: **consensus runs are stateless** — no session is created or resumed, since the
 same prompt is fanned out fresh to every tool.
 

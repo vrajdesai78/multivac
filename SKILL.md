@@ -50,6 +50,11 @@ python3 <skill_dir>/bin/multivac.py ask --tool claude --prompt "Reply with exact
 python3 <skill_dir>/bin/multivac.py consensus --tools codex,grok --prompt "What is 6 times 7? Reply with just the number."
 ```
 
+Add **`--synthesize`** to reconcile the answers into one (with agreements/disagreements
+flagged) — good for tricky logic where you want a single verdict rather than N to compare.
+Add **`--files a.py,b.py`** (on `ask` or `consensus`) to attach exact file contents as
+read-only context instead of relying on the delegate to read the working dir itself.
+
 **`doctor`** — confirms each delegate CLI is installed (with version) and reports any API-key
 env vars that would be scrubbed. It does NOT verify login — a delegate can be installed but
 not logged in; that surfaces on the first real `ask` as a "not logged in — run `<tool> login`"
