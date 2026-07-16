@@ -68,46 +68,22 @@ same prompt is fanned out fresh to every tool.
 ### `doctor` — is each CLI installed, and what would be scrubbed?
 
 ```
-python3 bin/multivac.py doctor
+multivac doctor
 ```
 
-```json
-[
-  {
-    "tool": "codex",
-    "installed": true,
-    "version": "codex-cli 0.144.4",
-    "scrubbed_keys": [],
-    "note": ""
-  },
-  {
-    "tool": "agy",
-    "installed": true,
-    "version": "1.1.3",
-    "scrubbed_keys": [],
-    "note": ""
-  },
-  {
-    "tool": "claude",
-    "installed": true,
-    "version": "2.1.211 (Claude Code)",
-    "scrubbed_keys": [],
-    "note": ""
-  },
-  {
-    "tool": "grok",
-    "installed": true,
-    "version": "grok 0.2.101 (5bc4b5dfadcf)",
-    "scrubbed_keys": [],
-    "note": ""
-  }
-]
+```
+  ✓ codex   codex-cli 0.144.4
+  ✓ agy     1.1.3
+  ✓ claude  2.1.211 (Claude Code)
+  ✓ grok    grok 0.2.101 (5bc4b5dfadcf)
 ```
 
-`doctor` confirms each delegate CLI is installed (with version) and reports any API-key env
-vars that would be scrubbed. It does NOT verify login — a delegate can be installed but not
-logged in; that surfaces on the first real `ask` as a "not logged in — run `<tool> login`"
-error. `--tools` narrows the check to a comma list (default `all`).
+Add `--json` for machine-readable output (the same rows as objects with `installed`,
+`version`, `scrubbed_keys`, `note`). `doctor` confirms each delegate CLI is installed (with
+version) and reports any API-key env vars that would be scrubbed. It does NOT verify login —
+a delegate can be installed but not logged in; that surfaces on the first real `ask` as a
+"not logged in — run `<tool> login`" error. `--tools` narrows the check to a comma list
+(default `all`).
 
 ### `sessions` — list recorded resumable sessions
 

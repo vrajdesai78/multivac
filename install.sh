@@ -23,10 +23,12 @@ MULTIVAC_BIN_DIR="${MULTIVAC_BIN_DIR:-$HOME/.local/bin}"
 DEST="$CLAUDE_SKILLS_DIR/multivac"
 LAUNCHER="$MULTIVAC_BIN_DIR/multivac"
 
-bold() { printf '\033[1m%s\033[0m\n' "$*"; }
-info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
+info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+ok()    { printf '  \033[1;32m✓\033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
+die()   { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+tilde() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}";; *) printf '%s' "$1";; esac; }
 
 uninstall() {
   info "Removing launcher $LAUNCHER"; rm -f "$LAUNCHER"
@@ -50,7 +52,7 @@ if [ ! -f "$REPO_DIR/bin/multivac.py" ]; then
   REPO_URL="${MULTIVAC_REPO_URL:-https://github.com/vrajdesai78/multivac.git}"
   REF="${MULTIVAC_REF:-main}"
   command -v git >/dev/null 2>&1 || die "git is required to bootstrap. Install git, or clone the repo and run ./install.sh."
-  info "Fetching multivac ($REF) -> $SRC"
+  info "Fetching multivac ($REF) → $(tilde "$SRC")"
   if [ -d "$SRC/.git" ]; then
     git -C "$SRC" fetch --depth 1 origin "$REF" >/dev/null 2>&1
     git -C "$SRC" reset --hard FETCH_HEAD >/dev/null 2>&1
@@ -63,7 +65,7 @@ if [ ! -f "$REPO_DIR/bin/multivac.py" ]; then
 fi
 
 # --- install skill (Claude Code) ------------------------------------------
-info "Installing skill -> $DEST"
+info "Installing to $(tilde "$DEST")"
 mkdir -p "$DEST"
 # Runtime files only (skip docs/, tests/, .git). Copy directory *contents* so
 # re-running merges cleanly without nesting bin/bin.
@@ -89,28 +91,28 @@ cat > "$LAUNCHER" <<EOF
 exec python3 "$DEST/bin/multivac.py" "\$@"
 EOF
 chmod +x "$LAUNCHER"
-info "Launcher -> $LAUNCHER"
-case ":$PATH:" in
-  *":$MULTIVAC_BIN_DIR:"*) ;;
-  *) warn "$MULTIVAC_BIN_DIR is not on your PATH. Add this to your shell profile:"
-     printf '       export PATH="%s:$PATH"\n' "$MULTIVAC_BIN_DIR" >&2 ;;
-esac
+ok "skill      $(tilde "$DEST")"
+ok "launcher   $(tilde "$LAUNCHER")   (run: multivac)"
 
 # --- Codex packaging (optional) -------------------------------------------
 if command -v codex >/dev/null 2>&1; then
   mkdir -p "$CODEX_PROMPTS_DIR"
   cp "$REPO_DIR/codex/prompts/multivac.md" "$CODEX_PROMPTS_DIR/multivac.md"
-  info "Codex prompt -> $CODEX_PROMPTS_DIR/multivac.md (invoke with /prompts:multivac)"
-  info "To let Codex orchestrate the others, paste codex/AGENTS.snippet.md into ~/.codex/AGENTS.md"
+  ok "codex      $(tilde "$CODEX_PROMPTS_DIR/multivac.md")   (invoke: /prompts:multivac)"
 fi
 
 # --- readiness check ------------------------------------------------------
 echo
-info "Checking delegate CLIs (installed + which API-key env vars would be scrubbed):"
-"$LAUNCHER" doctor || warn "doctor reported a problem — install/log in to any missing CLI."
+info "Delegate CLIs:"
+"$LAUNCHER" doctor || warn "a delegate is missing or not logged in — install/log in and re-run."
 
 echo
-bold "multivac installed."
-echo "Try:  multivac ask --tool codex --prompt 'explain this repo in one line' --mode plan"
-echo "      multivac consensus --tools codex,grok,agy --prompt 'best way to do X?'"
-echo "Docs: $DEST/README.md"
+bold "✓ multivac installed."
+echo "  Try:  multivac consensus --tools codex,grok,agy --prompt \"best way to structure a CLI?\""
+echo "  Docs: $(tilde "$DEST/README.md")"
+case ":$PATH:" in
+  *":$MULTIVAC_BIN_DIR:"*) ;;
+  *) echo
+     warn "$(tilde "$MULTIVAC_BIN_DIR") is not on your PATH — add it, then restart your shell:"
+     printf '         export PATH="%s:$PATH"\n' "$(tilde "$MULTIVAC_BIN_DIR")" >&2 ;;
+esac

@@ -116,12 +116,17 @@ vars if you want non-default locations.
 Verify before you rely on it:
 
 ```console
-multivac doctor
+$ multivac doctor
+  ✓ codex   codex-cli 0.144.4
+  ✓ agy     1.1.3
+  ✓ claude  2.1.211 (Claude Code)
+  ✓ grok    grok 0.2.101 (5bc4b5dfadcf)
 ```
 
 `doctor` reports each delegate's install status and version, and which API-key env vars would
-be scrubbed. It does **not** verify login — a delegate that's installed but logged out
-surfaces on the first real `ask` as `"<tool>: not logged in — run <tool> login"`.
+be scrubbed (add `--json` for machine-readable output). It does **not** verify login — a
+delegate that's installed but logged out surfaces on the first real `ask` as
+`"<tool>: not logged in — run <tool> login"`.
 
 ## Use it from Claude Code or Codex
 

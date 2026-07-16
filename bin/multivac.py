@@ -515,6 +515,22 @@ def _version_of(tool: str):
         return None
 
 
+def _format_doctor(rows) -> str:
+    """Compact human-readable readiness summary (default output of `doctor`)."""
+    if not rows:
+        return "  (no tools)"
+    width = max(len(r["tool"]) for r in rows)
+    lines = []
+    for r in rows:
+        mark = "✓" if r["installed"] else "✗"
+        detail = _clean(r["version"]) if r["installed"] else (r.get("note") or "not installed")
+        lines.append(f"  {mark} {r['tool']:<{width}}  {detail}")
+    scrubbed = rows[0].get("scrubbed_keys") or []
+    if scrubbed:
+        lines.append(f"  ⚠ API-key env vars present (scrubbed from delegates): {', '.join(scrubbed)}")
+    return "\n".join(lines)
+
+
 def do_doctor(tools, *, which=shutil.which, version_runner=None) -> list:
     version_runner = version_runner or _version_of
     rows = []
@@ -567,7 +583,9 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--concurrency", type=int, default=3)
     add_common(c)
 
-    sub.add_parser("doctor").add_argument("--tools", default="all")
+    d = sub.add_parser("doctor")
+    d.add_argument("--tools", default="all")
+    d.add_argument("--json", dest="as_json", action="store_true")
     sub.add_parser("sessions")
     return p
 
@@ -619,7 +637,10 @@ def main(argv=None) -> int:
             if not tools:
                 print("ERROR: no valid tools", file=sys.stderr); return 1
             rows = do_doctor(list(tools))
-            print(json.dumps(rows, indent=2))
+            if args.as_json:
+                print(json.dumps(rows, indent=2))
+            else:
+                print(_format_doctor(rows))
             return 0 if all(r["installed"] for r in rows) else 1
         if args.cmd == "sessions":
             print(json.dumps(do_sessions(), indent=2))
