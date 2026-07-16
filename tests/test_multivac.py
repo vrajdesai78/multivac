@@ -243,3 +243,21 @@ def test_do_ask_timeout_maps_error(tmp_path, monkeypatch):
     req = mv.Req(tool="codex", prompt="x", cwd=str(tmp_path))
     res = mv.do_ask(req, runner=_fake_runner_factory("", code=None, timed_out=True))
     assert not res.ok and "timed out" in res.error.lower()
+
+
+def test_consensus_runs_all_and_tolerates_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    def fake_asker(req, **kw):
+        if req.tool == "grok":
+            return mv.Result(tool="grok", ok=False, error="boom")
+        return mv.Result(tool=req.tool, ok=True, answer=f"ans-{req.tool}")
+    base = mv.Req(tool="_", prompt="q", cwd=str(tmp_path))
+    results = mv.do_consensus(["codex", "grok", "claude"], base, concurrency=2, asker=fake_asker)
+    by = {r.tool: r for r in results}
+    assert by["codex"].ok and by["claude"].ok and not by["grok"].ok
+    assert {r.tool for r in results} == {"codex", "grok", "claude"}
+
+def test_consensus_all_excludes_host(monkeypatch, tmp_path):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path)); monkeypatch.setenv("MULTIVAC_HOST", "claude")
+    tools = mv.resolve_consensus_tools("all")
+    assert "claude" not in tools and set(tools) == {"codex", "agy", "grok"}

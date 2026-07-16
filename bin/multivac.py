@@ -10,7 +10,8 @@ uses its own on-disk login.
 """
 from __future__ import annotations
 import argparse, json, os, re, signal, subprocess, sys, tempfile, time, uuid
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 TOOLS = ("codex", "agy", "claude", "grok")
@@ -390,6 +391,28 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
                   exit_code=code, duration_s=dur, cost_usd=cost)
 
 
+def resolve_consensus_tools(spec: str) -> list:
+    if spec == "all":
+        host = os.environ.get("MULTIVAC_HOST")
+        return [t for t in TOOLS if t != host]
+    return [t.strip() for t in spec.split(",") if t.strip() in TOOLS]
+
+
+def do_consensus(tools, base: Req, *, concurrency=3, asker=do_ask) -> list:
+    reqs = [replace(base, tool=t, session=None) for t in tools]   # consensus is stateless
+    results = []
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as ex:
+        futs = {ex.submit(asker, r): r.tool for r in reqs}
+        for fut in futs:
+            try:
+                results.append(fut.result())
+            except Exception as e:               # defensive: never let one tool abort the batch
+                results.append(Result(tool=futs[fut], ok=False, error=str(e)))
+    order = {t: i for i, t in enumerate(tools)}
+    results.sort(key=lambda r: order.get(r.tool, 99))
+    return results
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="multivac", description="Invoke other AI coding CLIs on subscription auth.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -452,6 +475,21 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.cmd == "ask":
         return _emit(do_ask(_req_from_args(args)), args.as_json)
+    if args.cmd == "consensus":
+        tools = resolve_consensus_tools(args.tools)
+        if not tools:
+            print("ERROR: no valid tools", file=sys.stderr); return 1
+        base = Req(tool="_", prompt=(Path(args.prompt_file).read_text() if getattr(args, "prompt_file", None) else args.prompt),
+                   mode=args.mode, model=args.model, cwd=args.cwd, web_search=args.web_search,
+                   timeout=args.timeout, allow_api_keys=args.allow_api_keys, yes=args.yes, max_depth=args.max_depth)
+        results = do_consensus(tools, base, concurrency=args.concurrency)
+        if args.as_json:
+            print(json.dumps([r.__dict__ for r in results], indent=2))
+        else:
+            for r in results:
+                print(f"\n===== {r.tool} =====")
+                print(r.answer if r.ok else f"ERROR: {r.error}")
+        return 0 if any(r.ok for r in results) else 1
     print(f"multivac: {args.cmd} not yet implemented", file=sys.stderr)
     return 0
 
