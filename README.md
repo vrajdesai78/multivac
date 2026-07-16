@@ -24,13 +24,13 @@ Named after Asimov's Multivac — the great computer you bring every question to
 | **Hosts** | Claude Code (`SKILL.md`) and Codex (prompt + `AGENTS.md`) |
 
 ```console
-$ multivac consensus --tools codex,grok,agy --prompt "Simplest way to debounce in vanilla JS?"
+$ multivac consensus --tools codex,grok,agy --prompt "In one sentence: is it safe to free() the same pointer twice in C, and why?"
 ===== codex =====
-Wrap the handler in a setTimeout you clear on each call…
+No—calling free() twice on the same pointer is undefined behavior; the pointer no longer refers to allocated memory after the first call.
 ===== grok =====
-Use a closure over a timer id; clear-and-reset on every invocation…
+No — it's a "double free": undefined behavior that can corrupt the heap, crash, or be exploitable, because the allocator already released that block.
 ===== agy =====
-A single-timer debounce: reset the pending timeout each event…
+No, it causes undefined behavior (a "double free") — the first call returns the memory to the heap and leaves a dangling pointer the second call then tries to free.
 ```
 
 > `agy` is how multivac reaches Gemini. Google retired the individual Gemini CLI OAuth tier
@@ -122,6 +122,21 @@ multivac doctor
 `doctor` reports each delegate's install status and version, and which API-key env vars would
 be scrubbed. It does **not** verify login — a delegate that's installed but logged out
 surfaces on the first real `ask` as `"<tool>: not logged in — run <tool> login"`.
+
+## Use it from Claude Code or Codex
+
+Once installed, you usually don't type `multivac` yourself — you just ask your host CLI:
+
+- **Claude Code** auto-discovers the skill (it's in `~/.claude/skills/multivac/`). Ask
+  naturally — *"get a second opinion from codex on this diff"*, *"run a consensus across the
+  models"*, *"delegate this to grok"* — and Claude invokes `multivac` for you. (Skills load at
+  session start, so open a new session after installing.)
+- **Codex** — run `/prompts:multivac <question or task>`, and it delegates to `claude`/`agy`/
+  `grok`. Paste `codex/AGENTS.snippet.md` into `~/.codex/AGENTS.md` to let Codex reach for it
+  automatically.
+
+The `multivac` terminal command below is the same tool, for when you want to drive it directly
+or from scripts.
 
 ## Usage
 
