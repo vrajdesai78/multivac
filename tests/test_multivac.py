@@ -245,6 +245,87 @@ def test_do_ask_timeout_maps_error(tmp_path, monkeypatch):
     assert not res.ok and "timed out" in res.error.lower()
 
 
+def test_run_child_pty_reads_output_written_to_tty():
+    code, out, err, to = mv.run_child_pty(
+        [_sys.executable, "-c", "import sys; print('TTY' if sys.stdout.isatty() else 'NOTTY')"],
+        cwd=".", env={"PATH": mv.os.environ["PATH"]}, timeout=10)
+    assert to is False and code == 0
+    assert "TTY" in out and "NOTTY" not in out   # pty makes stdout a tty for the child
+
+def test_run_child_pty_times_out_and_kills_group():
+    t0 = mv.time.time()
+    code, out, err, to = mv.run_child_pty(
+        [_sys.executable, "-c", "import time; time.sleep(30)"],
+        cwd=".", env={"PATH": mv.os.environ["PATH"]}, timeout=1)
+    assert to is True and code is None
+    assert (mv.time.time() - t0) < 10
+
+
+def test_do_ask_agy_retries_via_pty_on_empty_stdout(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    # Fake "agy" binary that always emits nothing on stdout (simulates the non-TTY stdout-drop bug),
+    # placed first on PATH so the real run_child (subprocess, non-tty pipe) finds it and gets empty output.
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_agy = fake_bin_dir / "agy"
+    fake_agy.write_text("#!/bin/sh\nexit 0\n")
+    fake_agy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin_dir}{mv.os.pathsep}{mv.os.environ['PATH']}")
+    monkeypatch.setattr(mv, "run_child_pty", lambda argv, *, cwd, env, timeout: (0, "PONG", "", False))
+    req = mv.Req(tool="agy", prompt="hi", cwd=str(tmp_path))
+    res = mv.do_ask(req)   # default runner = real run_child -> triggers the agy PTY retry
+    assert res.ok and res.answer == "PONG"
+
+def test_do_ask_agy_pty_retry_records_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_agy = fake_bin_dir / "agy"
+    fake_agy.write_text("#!/bin/sh\nexit 0\n")
+    fake_agy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin_dir}{mv.os.pathsep}{mv.os.environ['PATH']}")
+    monkeypatch.setattr(mv, "run_child_pty", lambda argv, *, cwd, env, timeout: (0, "PONG", "", False))
+    req = mv.Req(tool="agy", prompt="hi", cwd=str(tmp_path), session="job")
+    res = mv.do_ask(req)
+    assert res.ok
+    st = mv.SessionStore(tmp_path)
+    # agy has no session id of its own; planned is None too, so nothing to record -- just must not crash
+    assert st.get("job", "agy", str(tmp_path)) is None
+
+def test_do_ask_agy_pty_retry_still_fails_if_pty_also_empty(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    fake_bin_dir = tmp_path / "bin"
+    fake_bin_dir.mkdir()
+    fake_agy = fake_bin_dir / "agy"
+    fake_agy.write_text("#!/bin/sh\nexit 0\n")
+    fake_agy.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin_dir}{mv.os.pathsep}{mv.os.environ['PATH']}")
+    monkeypatch.setattr(mv, "run_child_pty", lambda argv, *, cwd, env, timeout: (0, "", "", False))
+    req = mv.Req(tool="agy", prompt="hi", cwd=str(tmp_path))
+    res = mv.do_ask(req)
+    assert not res.ok and "agy" in res.error.lower()
+
+def test_do_ask_agy_no_pty_retry_when_custom_runner_used(tmp_path, monkeypatch):
+    # The retry is only for the default real runner; an explicit fake runner (e.g. other tests) must not trigger it.
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    monkeypatch.setattr(mv, "run_child_pty", lambda *a, **k: (0, "SHOULD-NOT-BE-USED", "", False))
+    req = mv.Req(tool="agy", prompt="hi", cwd=str(tmp_path))
+    res = mv.do_ask(req, runner=_fake_runner_factory(""))   # empty stdout, custom runner
+    assert not res.ok and "empty stdout" in res.error.lower()
+
+
+import os as _os, pytest
+
+@pytest.mark.skipif(_os.environ.get("MULTIVAC_LIVE") != "1", reason="live test; set MULTIVAC_LIVE=1")
+def test_live_doctor_and_plan_ask():
+    rows = mv.do_doctor(list(mv.TOOLS))
+    installed = [r["tool"] for r in rows if r["installed"]]
+    assert installed, "no delegate CLIs installed"
+    for t in installed:
+        res = mv.do_ask(mv.Req(tool=t, prompt="Reply with exactly: PONG", cwd=_os.getcwd(), mode="plan"))
+        assert res.ok and "PONG" in res.answer.upper(), f"{t}: {res.error or res.answer}"
+
+
 def test_consensus_runs_all_and_tolerates_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
     def fake_asker(req, **kw):

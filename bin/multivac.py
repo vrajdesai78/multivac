@@ -219,6 +219,37 @@ def run_child(argv, *, cwd, env, timeout, stdin_data=None):
     return (None if timed_out else proc.returncode, out or "", err or "", timed_out)
 
 
+def run_child_pty(argv, *, cwd, env, timeout):
+    """Fallback for agy's non-TTY stdout-drop: run under a pseudo-tty."""
+    import pty, select, errno
+    pid, fd = pty.fork()
+    if pid == 0:  # child
+        try:
+            os.chdir(cwd); os.execvpe(argv[0], argv, env)
+        except Exception:
+            os._exit(127)
+    buf, deadline = [], time.time() + timeout
+    timed_out = False
+    while True:
+        if time.time() > deadline:
+            timed_out = True
+            try: os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except Exception: pass
+            break
+        r, _, _ = select.select([fd], [], [], 0.5)
+        if fd in r:
+            try:
+                data = os.read(fd, 4096)
+            except OSError as e:
+                if e.errno == errno.EIO: break
+                raise
+            if not data: break
+            buf.append(data.decode("utf-8", "replace"))
+    try: _, status = os.waitpid(pid, 0); code = os.waitstatus_to_exitcode(status)
+    except Exception: code = None
+    return (None if timed_out else code, "".join(buf), "", timed_out)
+
+
 def parse_output(tool: str, stdout: str, stderr: str):
     framing = SPECS[tool]["framing"]
     if framing == "ndjson":                       # codex
@@ -382,6 +413,15 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
     try:
         answer, sid, cost = parse_output(req.tool, out, err)
     except ValueError as e:
+        if req.tool == "agy" and "empty stdout" in str(e) and runner is run_child:
+            code, out, err, timed_out = run_child_pty(argv, cwd=cwd, env=env, timeout=timeout)
+            try:
+                answer, sid, cost = parse_output("agy", out, err)
+            except ValueError as e2:
+                return Result(tool="agy", ok=False, cwd=cwd, exit_code=code, duration_s=dur, error=f"agy: {e2}")
+            sid = sid or planned
+            if req.session and sid: store.put(req.session, "agy", cwd, sid)
+            return Result(tool="agy", ok=True, answer=answer, session_id=sid, cwd=cwd, exit_code=code, duration_s=dur)
         return Result(tool=req.tool, ok=False, cwd=cwd, exit_code=code, duration_s=dur,
                       error=f"{req.tool}: {e}\n{chr(10).join(err.splitlines()[-6:])}")
     sid = sid or planned
