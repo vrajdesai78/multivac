@@ -60,18 +60,34 @@ You don't need all four — multivac uses whichever are installed. Run `multivac
 
 ## Install
 
+One line — no clone, no `cd`:
+
+```console
+curl -fsSL https://raw.githubusercontent.com/vrajdesai78/multivac/main/install.sh | bash
+```
+
+That installs the skill to `~/.claude/skills/multivac/`, installs the Codex prompt (if `codex`
+is present), and drops a **`multivac`** launcher in `~/.local/bin` so you can run it as a plain
+command. Re-run the same line any time to upgrade. To remove everything it installed:
+
+```console
+curl -fsSL https://raw.githubusercontent.com/vrajdesai78/multivac/main/install.sh | bash -s -- --uninstall
+```
+
+If `~/.local/bin` isn't on your `PATH`, the installer prints the line to add.
+
+<details>
+<summary>Prefer to read the script first? (recommended for curl-to-bash)</summary>
+
 ```console
 git clone https://github.com/vrajdesai78/multivac.git
 cd multivac
+less install.sh      # audit it
 ./install.sh
 ```
 
-`install.sh` copies the skill to `~/.claude/skills/multivac/`, installs the Codex prompt (if
-`codex` is present), and drops a **`multivac`** launcher in `~/.local/bin`. Re-run it any time
-to upgrade; `./install.sh --uninstall` removes what it installed.
-
-If `~/.local/bin` isn't on your `PATH`, the installer tells you the line to add. You can also
-skip the installer and run `python3 bin/multivac.py …` directly from the clone.
+You can also skip the installer entirely and run `python3 bin/multivac.py …` from the clone.
+</details>
 
 <details>
 <summary>Manual install / custom locations</summary>

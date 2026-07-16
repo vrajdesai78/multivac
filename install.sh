@@ -42,6 +42,26 @@ uninstall() {
 command -v python3 >/dev/null 2>&1 || die "python3 is required but not found on PATH."
 info "Using $(python3 --version 2>&1)"
 
+# --- bootstrap: fetch sources if run via `curl | bash` (no clone present) --
+# When piped from the web, this script has no sibling files, so clone the repo
+# into a cache dir and install from there. When run from a clone, use it as-is.
+if [ ! -f "$REPO_DIR/bin/multivac.py" ]; then
+  SRC="${MULTIVAC_SRC_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/multivac/src}"
+  REPO_URL="${MULTIVAC_REPO_URL:-https://github.com/vrajdesai78/multivac.git}"
+  REF="${MULTIVAC_REF:-main}"
+  command -v git >/dev/null 2>&1 || die "git is required to bootstrap. Install git, or clone the repo and run ./install.sh."
+  info "Fetching multivac ($REF) -> $SRC"
+  if [ -d "$SRC/.git" ]; then
+    git -C "$SRC" fetch --depth 1 origin "$REF" >/dev/null 2>&1
+    git -C "$SRC" reset --hard FETCH_HEAD >/dev/null 2>&1
+  else
+    mkdir -p "$(dirname "$SRC")"
+    git clone --depth 1 --branch "$REF" "$REPO_URL" "$SRC" >/dev/null 2>&1 \
+      || die "failed to clone $REPO_URL (branch $REF)."
+  fi
+  REPO_DIR="$SRC"
+fi
+
 # --- install skill (Claude Code) ------------------------------------------
 info "Installing skill -> $DEST"
 mkdir -p "$DEST"
