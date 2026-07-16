@@ -50,8 +50,10 @@ python3 <skill_dir>/bin/multivac.py ask --tool claude --prompt "Reply with exact
 python3 <skill_dir>/bin/multivac.py consensus --tools codex,grok --prompt "What is 6 times 7? Reply with just the number."
 ```
 
-**`doctor`** — confirm a delegate is installed and on subscription auth (no API key env vars
-leaking through) before relying on it:
+**`doctor`** — confirms each delegate CLI is installed (with version) and reports any API-key
+env vars that would be scrubbed. It does NOT verify login — a delegate can be installed but
+not logged in; that surfaces on the first real `ask` as a "not logged in — run `<tool> login`"
+error:
 
 ```
 python3 <skill_dir>/bin/multivac.py doctor
