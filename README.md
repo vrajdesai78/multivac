@@ -19,7 +19,7 @@ Named after Asimov's Multivac — the great computer you bring every question to
 |---|---|
 | **Delegates** | `codex` · `agy` (Gemini/Claude/GPT-OSS via Antigravity) · `claude` · `grok` |
 | **Commands** | `ask` · `consensus` (fan-out, `--synthesize` to reconcile) · `review` (cross-CLI code review) · `debate` · `doctor` · `sessions` |
-| **Power flags** | `--files` (attach context) · `--best-of-n` · `--check` (self-verify) · `--schema` (structured output) · `agy:model` (model-level fan-out) · `--prompt -` (stdin) |
+| **Power flags** | `--files` (attach context) · `--best-of-n` · `--check` (self-verify) · `--schema` (structured output) · `agy:model` (model-level fan-out) · `--cache` · `--prompt -` (stdin) |
 | **Modes** | `plan` (read-only, default) · `edit` · `full` (gated behind an explicit ack) |
 | **Auth** | each delegate's own subscription login — **no per-model API keys** |
 | **Hosts** | Claude Code (`SKILL.md`) and Codex (prompt + `AGENTS.md`) |
@@ -193,11 +193,15 @@ multivac consensus --tools agy:gemini-3-pro,agy:claude-opus,codex --prompt "..."
 # Make a delegate double-check itself, or return structured JSON
 multivac ask --tool grok --check --prompt "What's the bug?"
 multivac ask --tool codex --schema out.schema.json --prompt "Extract the API surface"
+
+# Cache identical read-only calls (second run is instant, no quota spent)
+multivac ask --tool codex --cache --prompt "Explain this error"
 ```
 
+Fan-out commands print a one-line `# N calls · ~Xs · $Y` cost/timing summary to stderr.
 Common flags: `--mode`, `--model`, `--cwd`, `--timeout`, `--session`, `--files`,
-`--agent`/`--agents`, `--check`, `--schema`, `--web-search`, `--concurrency`, `--json`,
-`--max-depth`. Full reference: [`references/usage.md`](references/usage.md). Per-CLI argv,
+`--agent`/`--agents`, `--check`, `--schema`, `--cache`, `--web-search`, `--concurrency`,
+`--json`, `--max-depth`. Full reference: [`references/usage.md`](references/usage.md). Per-CLI argv,
 output framing, and session-id handling: [`references/cli-matrix.md`](references/cli-matrix.md).
 
 ## Modes

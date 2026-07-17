@@ -9,7 +9,7 @@ of its own, has no telemetry, and never reads your OAuth tokens — each delegat
 uses its own on-disk login.
 """
 from __future__ import annotations
-import argparse, json, os, re, shutil, signal, subprocess, sys, tempfile, time, uuid
+import argparse, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -40,6 +40,7 @@ class Req:
     check: bool = False             # append a self-verification instruction to the prompt
     schema: "str | None" = None     # path to a JSON schema for structured output
     best_of: int = 1                # run N times and synthesize/pick the best (ask)
+    cache: bool = False             # read/write a local result cache (opt-in)
 
 
 SPECS = {
@@ -414,6 +415,41 @@ def multivac_home() -> Path:
     return Path(os.environ.get("MULTIVAC_HOME", os.path.join(os.getcwd(), ".multivac")))
 
 
+def _cache_dir_path() -> Path:
+    return multivac_home() / "cache"
+
+
+def _cache_key(req: Req, prompt: str) -> str:
+    raw = "\x00".join([req.tool, req.mode, req.model or "",
+                       os.path.abspath(req.cwd or os.getcwd()), prompt])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_read(path: Path):
+    try:
+        if path.is_symlink():           # don't follow a pre-planted symlink
+            return None
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _cache_write(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".c-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data))
+        os.replace(tmp, path)           # mkstemp is 0600; atomic
+        os.chmod(path, 0o600)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def resolve_prompt(req: Req) -> str:
     if getattr(req, "prompt", None):
         return req.prompt
@@ -497,6 +533,15 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
     if req.mode == "full":
         print(f"multivac: WARNING running {req.tool} in FULL mode (auto-approves all) in {cwd}", file=sys.stderr)
 
+    # cache (opt-in): reuse an identical prior answer. Skipped for sessions/write modes.
+    cache_path = None
+    if req.cache and not req.session and req.mode == "plan":
+        cache_path = _cache_dir_path() / (_cache_key(req, prompt) + ".json")
+        hit = _cache_read(cache_path)
+        if hit is not None:
+            return Result(tool=req.tool, ok=True, answer=hit["answer"], session_id=hit.get("session_id"),
+                          cwd=cwd, cost_usd=hit.get("cost"), duration_s=0.0)
+
     store = SessionStore(multivac_home())
     session_id = store.get(req.session, req.tool, cwd) if req.session else None
     new_sid = None
@@ -531,6 +576,11 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
     sid = sid or planned
     if req.session and sid:
         store.put(req.session, req.tool, cwd, sid)
+    if cache_path is not None and answer:
+        try:
+            _cache_write(cache_path, {"answer": answer, "session_id": sid, "cost": cost})
+        except OSError:
+            pass
     return Result(tool=req.tool, ok=True, answer=answer, session_id=sid, cwd=cwd,
                   exit_code=code, duration_s=dur, cost_usd=cost)
 
@@ -753,6 +803,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--check", action="store_true",
                         help="ask the delegate to double-check and correct its own answer before finalizing")
         sp.add_argument("--schema", help="path to a JSON schema file for structured (JSON) output")
+        sp.add_argument("--cache", action="store_true",
+                        help="reuse a cached answer for an identical (tool, mode, model, prompt) call")
 
     a = sub.add_parser("ask")
     a.add_argument("--tool", choices=TOOLS, required=True)
@@ -834,7 +886,8 @@ def _req_from_args(args) -> Req:
                allow_api_keys=args.allow_api_keys, yes=args.yes, as_json=args.as_json, max_depth=args.max_depth,
                files=getattr(args, "files", None), check=getattr(args, "check", False),
                schema=_validate_schema(getattr(args, "schema", None)),
-               best_of=max(1, min(getattr(args, "best_of", 1), MAX_BEST_OF)))
+               best_of=max(1, min(getattr(args, "best_of", 1), MAX_BEST_OF)),
+               cache=getattr(args, "cache", False))
 
 
 def _emit(res: Result, as_json: bool) -> int:
@@ -852,7 +905,20 @@ def _common_req(args, prompt) -> Req:
     return Req(tool="_", prompt=prompt, mode=args.mode, model=_validate_model(args.model), cwd=args.cwd,
                web_search=args.web_search, timeout=args.timeout, allow_api_keys=args.allow_api_keys,
                yes=args.yes, max_depth=args.max_depth, files=getattr(args, "files", None),
-               check=getattr(args, "check", False), schema=_validate_schema(getattr(args, "schema", None)))
+               check=getattr(args, "check", False), schema=_validate_schema(getattr(args, "schema", None)),
+               cache=getattr(args, "cache", False))
+
+
+def _stats_line(*groups) -> str:
+    results = [r for g in groups for r in g if r is not None]
+    costs = [r.cost_usd for r in results if r.cost_usd]
+    dur = max((r.duration_s for r in results), default=0.0)
+    parts = [f"{len(results)} call" + ("s" if len(results) != 1 else "")]
+    if dur:
+        parts.append(f"~{dur:.1f}s")
+    if costs:
+        parts.append(f"${sum(costs):.4f}" + ("" if len(costs) == len(results) else " (partial)"))
+    return "  ·  ".join(parts)
 
 
 def _emit_consensus(results, synthesis, as_json) -> int:
@@ -869,6 +935,7 @@ def _emit_consensus(results, synthesis, as_json) -> int:
         if synthesis is not None:
             print(f"\n===== synthesis (via {_clean(synthesis.label or synthesis.tool)}) =====")
             print(_clean(synthesis.answer) if synthesis.ok else f"ERROR: {_clean(synthesis.error)}")
+    print(f"# {_stats_line(results, [synthesis])}", file=sys.stderr)
     return 0 if any(r.ok for r in results) else 1
 
 

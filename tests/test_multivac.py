@@ -647,3 +647,33 @@ def test_validate_schema_size(tmp_path):
     big = tmp_path / "s.json"; big.write_text("x" * (mv.MAX_SCHEMA_BYTES + 10))
     with pytest.raises(ValueError):
         mv._validate_schema(str(big))
+
+
+def _fake_ok_runner(answer="CACHED", counter=None):
+    def r(argv, *, cwd, env, timeout, stdin_data=None):
+        if counter is not None:
+            counter["n"] += 1
+        return (0, '{"type":"result","result":"%s","session_id":"s"}' % answer, "", False)
+    return r
+
+def test_cache_hit_avoids_second_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    c = {"n": 0}
+    req = mv.Req(tool="claude", prompt="q", cwd=str(tmp_path), cache=True)
+    r1 = mv.do_ask(req, runner=_fake_ok_runner("CACHED", c))
+    r2 = mv.do_ask(req, runner=_fake_ok_runner("CACHED", c))
+    assert r1.answer == "CACHED" and r2.answer == "CACHED"
+    assert c["n"] == 1                      # second call served from cache, runner not hit
+
+def test_cache_skipped_for_sessions(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    c = {"n": 0}
+    req = mv.Req(tool="claude", prompt="q", cwd=str(tmp_path), cache=True, session="job")
+    mv.do_ask(req, runner=_fake_ok_runner("x", c)); mv.do_ask(req, runner=_fake_ok_runner("x", c))
+    assert c["n"] == 2                      # sessions are stateful -> never cached
+
+def test_stats_line_partial_cost():
+    rs = [mv.Result(tool="a", ok=True, duration_s=1.2, cost_usd=0.01),
+          mv.Result(tool="b", ok=True, duration_s=2.5)]
+    line = mv._stats_line(rs)
+    assert "2 calls" in line and "2.5s" in line and "0.01" in line and "partial" in line
