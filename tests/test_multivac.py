@@ -611,3 +611,39 @@ def test_do_ask_rejects_oversized_argv_prompt(tmp_path, monkeypatch):
     res = mv.do_ask(mv.Req(tool="codex", prompt=big, cwd=str(tmp_path)),
                     runner=lambda *a, **k: (0, "", "", False))
     assert not res.ok and "CLI argument" in res.error
+
+
+def test_git_diff_rejects_option_shaped_refs():
+    import pytest
+    with pytest.raises(ValueError):
+        mv._git_diff("--output=/tmp/pwn", None, cwd=".")   # arg-injection ref rejected
+    with pytest.raises(ValueError):
+        mv._git_diff(None, "-p", cwd=".")
+
+def test_resolve_consensus_rejects_bad_model():
+    import pytest
+    with pytest.raises(ValueError):
+        mv.resolve_consensus_tools("agy:--dangerously-skip")   # option-shaped model rejected
+
+def test_resolve_consensus_dedupes_and_caps():
+    specs = mv.resolve_consensus_tools("codex,codex,grok,grok")
+    assert specs == [("codex", None), ("grok", None)]        # de-duplicated
+    many = ",".join(["codex:m%d" % i for i in range(50)])
+    assert len(mv.resolve_consensus_tools(many)) <= mv.MAX_CONSENSUS_SPECS
+
+def test_best_of_clamped():
+    ns = mv.build_parser().parse_args(["ask", "--tool", "codex", "--prompt", "x", "--best-of-n", "100000"])
+    req = mv._req_from_args(ns)
+    assert req.best_of == mv.MAX_BEST_OF
+
+def test_validate_model_rejects_leading_dash():
+    import pytest
+    with pytest.raises(ValueError):
+        mv._validate_model("-foo")
+    assert mv._validate_model("gemini-3-pro") == "gemini-3-pro"
+
+def test_validate_schema_size(tmp_path):
+    import pytest
+    big = tmp_path / "s.json"; big.write_text("x" * (mv.MAX_SCHEMA_BYTES + 10))
+    with pytest.raises(ValueError):
+        mv._validate_schema(str(big))

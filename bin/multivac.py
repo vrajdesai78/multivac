@@ -535,21 +535,34 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
                   exit_code=code, duration_s=dur, cost_usd=cost)
 
 
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,63}$")   # no leading dash; bounded
+MAX_CONSENSUS_SPECS = 16
+
+
+def _validate_model(model):
+    if model is not None and not _MODEL_RE.match(model):
+        raise ValueError(f"invalid model name: {model!r}")
+    return model
+
+
 def resolve_consensus_tools(spec: str) -> list:
-    """Return a list of (tool, model) tuples. An entry may be 'tool' or 'tool:model'
-    (e.g. 'agy:gemini-3-pro') to fan out across specific models, not just CLIs."""
+    """Return a de-duplicated list of (tool, model) tuples (capped). An entry may be
+    'tool' or 'tool:model' (e.g. 'agy:gemini-3-pro') to fan out across models, not just CLIs."""
     if spec == "all":
         host = os.environ.get("MULTIVAC_HOST")
         return [(t, None) for t in TOOLS if t != host]
-    out = []
+    out, seen = [], set()
     for item in spec.split(","):
         item = item.strip()
         if not item:
             continue
         tool, _, model = item.partition(":")
-        tool, model = tool.strip(), (model.strip() or None)
-        if tool in TOOLS:
+        tool, model = tool.strip(), _validate_model(model.strip() or None)
+        if tool in TOOLS and (tool, model) not in seen:
+            seen.add((tool, model))
             out.append((tool, model))
+        if len(out) >= MAX_CONSENSUS_SPECS:
+            break
     return out
 
 
@@ -562,7 +575,7 @@ def do_consensus(specs, base: Req, *, concurrency=3, asker=do_ask) -> list:
     labels = [t if m is None else f"{t}:{m}" for t, m in norm]
     reqs = [replace(base, tool=t, model=(m or base.model), session=None) for t, m in norm]
     indexed = []
-    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as ex:
+    with ThreadPoolExecutor(max_workers=max(1, min(concurrency, 8))) as ex:   # bound thread storm
         futs = {ex.submit(asker, r): i for i, r in enumerate(reqs)}
         for fut in futs:
             i = futs[fut]
@@ -623,6 +636,7 @@ def do_debate(tools, base: Req, *, rounds=2, judge=None, asker=do_ask) -> tuple:
     """Two delegates answer, then critique each other over rounds, then one writes the final answer.
     Returns (transcript_list, final_Result)."""
     a, b = tools[0], tools[1]
+    rounds = max(1, min(rounds, 6))          # bound fan-out
     q = resolve_prompt(base)
     transcript = []
     ans = {}
@@ -648,18 +662,33 @@ def do_debate(tools, base: Req, *, rounds=2, judge=None, asker=do_ask) -> tuple:
     return transcript, final
 
 
+_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/@^~-]{0,199}$")   # git ref/SHA; no leading dash
+
+
 def _git_diff(base_ref, commit, *, cwd=None) -> str:
     cwd = os.path.abspath(cwd or os.getcwd())
+    for v in (base_ref, commit):
+        if v is not None and not _REF_RE.match(v):   # reject option-shaped refs (arg injection)
+            raise ValueError(f"invalid git ref: {v!r}")
+    # Run git in what may be an untrusted repo: neutralize config-driven code execution
+    # (external diff drivers, textconv filters, fsmonitor, hooks) and stop option parsing.
+    safe = ["git", "-C", cwd, "-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null"]
+    tail = ["--no-ext-diff", "--no-textconv", "--end-of-options"]
     if commit:
-        argv = ["git", "-C", cwd, "show", commit]
+        argv = safe + ["show"] + tail + [commit]
     elif base_ref:
-        argv = ["git", "-C", cwd, "diff", f"{base_ref}...HEAD"]
+        argv = safe + ["diff"] + tail + [f"{base_ref}...HEAD"]
     else:
-        argv = ["git", "-C", cwd, "diff", "HEAD"]   # uncommitted changes
-    out = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    if out.returncode != 0:
-        raise ValueError(f"git diff failed: {out.stderr.strip() or 'not a git repo?'}")
-    return out.stdout
+        argv = safe + ["diff"] + tail + ["HEAD"]     # uncommitted changes
+    env = {k: os.environ[k] for k in ("PATH", "HOME") if k in os.environ}
+    code, out, err, timed_out = run_child(argv, cwd=cwd, env=env, timeout=60)   # bounds output + time
+    if timed_out:
+        raise ValueError("git diff timed out")
+    if code not in (0, None):
+        raise ValueError(f"git diff failed: {(err or '').strip() or 'not a git repo?'}")
+    if len(out.encode("utf-8", "ignore")) > MAX_ARGV_PROMPT:
+        raise ValueError(f"diff exceeds {MAX_ARGV_PROMPT // 1024} KB — review a narrower range (--base/--commit)")
+    return out
 
 
 def _version_of(tool: str):
@@ -787,13 +816,25 @@ def _resolve_prompt_arg(args) -> str:
     return prompt
 
 
+MAX_SCHEMA_BYTES = 256 * 1024
+MAX_BEST_OF = 8
+
+
+def _validate_schema(path):
+    if path is not None and os.path.getsize(path) > MAX_SCHEMA_BYTES:
+        raise ValueError(f"--schema file exceeds {MAX_SCHEMA_BYTES // 1024} KB")
+    return path
+
+
 def _req_from_args(args) -> Req:
-    return Req(tool=args.tool, prompt=_resolve_prompt_arg(args), mode=args.mode, model=args.model, cwd=args.cwd,
+    return Req(tool=args.tool, prompt=_resolve_prompt_arg(args), mode=args.mode,
+               model=_validate_model(args.model), cwd=args.cwd,
                session=getattr(args, "session", None), agent=getattr(args, "agent", None),
                agents=getattr(args, "agents", None), web_search=args.web_search, timeout=args.timeout,
                allow_api_keys=args.allow_api_keys, yes=args.yes, as_json=args.as_json, max_depth=args.max_depth,
                files=getattr(args, "files", None), check=getattr(args, "check", False),
-               schema=getattr(args, "schema", None), best_of=getattr(args, "best_of", 1))
+               schema=_validate_schema(getattr(args, "schema", None)),
+               best_of=max(1, min(getattr(args, "best_of", 1), MAX_BEST_OF)))
 
 
 def _emit(res: Result, as_json: bool) -> int:
@@ -808,10 +849,10 @@ def _emit(res: Result, as_json: bool) -> int:
 
 def _common_req(args, prompt) -> Req:
     """Base Req for fan-out commands (tool is a placeholder, set per delegate)."""
-    return Req(tool="_", prompt=prompt, mode=args.mode, model=args.model, cwd=args.cwd,
+    return Req(tool="_", prompt=prompt, mode=args.mode, model=_validate_model(args.model), cwd=args.cwd,
                web_search=args.web_search, timeout=args.timeout, allow_api_keys=args.allow_api_keys,
                yes=args.yes, max_depth=args.max_depth, files=getattr(args, "files", None),
-               check=getattr(args, "check", False), schema=getattr(args, "schema", None))
+               check=getattr(args, "check", False), schema=_validate_schema(getattr(args, "schema", None)))
 
 
 def _emit_consensus(results, synthesis, as_json) -> int:
@@ -823,10 +864,10 @@ def _emit_consensus(results, synthesis, as_json) -> int:
                               "synthesis": synthesis.__dict__}, indent=2))
     else:
         for r in results:
-            print(f"\n===== {r.label or r.tool} =====")
+            print(f"\n===== {_clean(r.label or r.tool)} =====")
             print(_clean(r.answer) if r.ok else f"ERROR: {_clean(r.error)}")
         if synthesis is not None:
-            print(f"\n===== synthesis (via {synthesis.label or synthesis.tool}) =====")
+            print(f"\n===== synthesis (via {_clean(synthesis.label or synthesis.tool)}) =====")
             print(_clean(synthesis.answer) if synthesis.ok else f"ERROR: {_clean(synthesis.error)}")
     return 0 if any(r.ok for r in results) else 1
 
@@ -870,9 +911,9 @@ def main(argv=None) -> int:
                                   "final": final.__dict__}, indent=2))
             else:
                 for who, text in transcript:
-                    print(f"\n----- {who} -----")
+                    print(f"\n----- {_clean(who)} -----")
                     print(_clean(text))
-                print(f"\n===== final answer (via {final.label or final.tool}) =====")
+                print(f"\n===== final answer (via {_clean(final.label or final.tool)}) =====")
                 print(_clean(final.answer) if final.ok else f"ERROR: {_clean(final.error)}")
             return 0 if final.ok else 1
         if args.cmd == "doctor":
