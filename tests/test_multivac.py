@@ -377,8 +377,81 @@ def test_consensus_runs_all_and_tolerates_failure(tmp_path, monkeypatch):
 
 def test_consensus_all_excludes_host(monkeypatch, tmp_path):
     monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path)); monkeypatch.setenv("MULTIVAC_HOST", "claude")
-    tools = mv.resolve_consensus_tools("all")
-    assert "claude" not in tools and set(tools) == {"codex", "agy", "grok"}
+    specs = mv.resolve_consensus_tools("all")   # now (tool, model) tuples
+    names = {t for t, _ in specs}
+    assert "claude" not in names and names == {"codex", "agy", "grok"}
+    assert all(m is None for _, m in specs)
+
+def test_resolve_consensus_tools_parses_model():
+    specs = mv.resolve_consensus_tools("agy:gemini-3-pro,codex,grok:grok-4")
+    assert specs == [("agy", "gemini-3-pro"), ("codex", None), ("grok", "grok-4")]
+
+def test_do_consensus_model_spec_sets_model_and_label(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    seen = {}
+    def fake(req, **kw):
+        seen[req.tool] = req.model
+        return mv.Result(tool=req.tool, ok=True, answer="x")
+    base = mv.Req(tool="_", prompt="q", cwd=str(tmp_path))
+    results = mv.do_consensus([("agy", "gemini-3-pro"), ("codex", None)], base, asker=fake)
+    labels = [r.label for r in results]
+    assert "agy:gemini-3-pro" in labels and "codex" in labels
+    assert seen["agy"] == "gemini-3-pro"
+
+def test_do_best_of_synthesizes(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    calls = {"n": 0}
+    def fake(req, **kw):
+        calls["n"] += 1
+        # the final call is the synthesis (prompt contains "ANSWERS:")
+        if "ANSWERS:" in req.prompt:
+            return mv.Result(tool=req.tool, ok=True, answer="SYNTH")
+        return mv.Result(tool=req.tool, ok=True, answer="attempt")
+    base = mv.Req(tool="codex", prompt="hard problem", cwd=str(tmp_path))
+    res = mv.do_best_of(base, 3, asker=fake)
+    assert res.ok and res.answer == "SYNTH" and calls["n"] == 4   # 3 attempts + 1 synth
+
+def test_do_debate_rounds_and_final(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    def fake(req, **kw):
+        return mv.Result(tool=req.tool, ok=True, answer=f"{req.tool}-says")
+    base = mv.Req(tool="_", prompt="X or Y?", cwd=str(tmp_path))
+    transcript, final = mv.do_debate(["codex", "grok"], base, rounds=2, judge="codex", asker=fake)
+    who = [w for w, _ in transcript]
+    assert any("opening" in w for w in who) and any("rebuttal" in w for w in who)
+    assert final.ok
+
+def test_do_review_builds_diff_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    seen = {}
+    def fake(req, **kw):
+        seen["prompt"] = req.prompt
+        return mv.Result(tool=req.tool, ok=True, answer="reviewed")
+    base = mv.Req(tool="_", prompt="focus on security", cwd=str(tmp_path))
+    results, synth = mv.do_review(["codex"], base, diff_text="+ dangerous = eval(x)", asker=fake)
+    assert results[0].ok
+    assert "dangerous = eval(x)" in seen["prompt"] and "focus on security" in seen["prompt"]
+
+def test_do_review_empty_diff_raises(tmp_path):
+    import pytest
+    base = mv.Req(tool="_", prompt="", cwd=str(tmp_path))
+    with pytest.raises(ValueError):
+        mv.do_review(["codex"], base, diff_text="   \n")
+
+def test_stdin_prompt_dash(monkeypatch):
+    import io
+    monkeypatch.setattr(mv.sys, "stdin", io.StringIO("piped question"))
+    ns = mv.build_parser().parse_args(["ask", "--tool", "codex", "--prompt", "-"])
+    assert mv._resolve_prompt_arg(ns) == "piped question"
+
+def test_check_flag_appends_verify(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    seen = {}
+    def fake(argv, *, cwd, env, timeout, stdin_data=None):
+        seen["argv"] = argv
+        return (0, '{"type":"result","result":"ok","session_id":"s"}', "", False)
+    mv.do_ask(mv.Req(tool="claude", prompt="solve", cwd=str(tmp_path), check=True), runner=fake)
+    assert "double-check" in " ".join(seen["argv"]).lower()
 
 
 def test_doctor_reports_installed_and_scrubbed(monkeypatch):
@@ -530,3 +603,11 @@ def test_build_synthesis_prompt_includes_ok_answers_only():
     assert "codex" in p and "AAA" in p and "grok" in p and "BBB" in p
     assert "agy" not in p and "boom" not in p  # failed delegate excluded
     assert "Agreements" in p and "Disagreements" in p
+
+
+def test_do_ask_rejects_oversized_argv_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("MULTIVAC_HOME", str(tmp_path))
+    big = "x" * (200 * 1024)  # 200 KB, over the ~96 KB single-argv guard (avoids E2BIG)
+    res = mv.do_ask(mv.Req(tool="codex", prompt=big, cwd=str(tmp_path)),
+                    runner=lambda *a, **k: (0, "", "", False))
+    assert not res.ok and "CLI argument" in res.error

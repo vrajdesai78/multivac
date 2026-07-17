@@ -37,6 +37,9 @@ class Req:
     as_json: bool = False
     max_depth: int = 2
     files: "str | None" = None      # comma-separated paths attached as read-only context
+    check: bool = False             # append a self-verification instruction to the prompt
+    schema: "str | None" = None     # path to a JSON schema for structured output
+    best_of: int = 1                # run N times and synthesize/pick the best (ask)
 
 
 SPECS = {
@@ -158,6 +161,8 @@ def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None, a
         argv += mode_flags("codex", req.mode, resume=resume)
         if req.model:
             argv += ["--model", req.model]
+        if req.schema:
+            argv += ["--output-schema", req.schema]
         argv += _web_flags("codex", req.web_search)
 
     elif tool == "claude":
@@ -177,6 +182,8 @@ def build_argv(req: Req, *, session_id=None, new_session_id=None, prompt=None, a
         argv += mode_flags("grok", req.mode)
         if req.model:
             argv += ["--model", req.model]
+        if req.schema:
+            argv += ["--json-schema", Path(req.schema).read_text()]
         argv += _web_flags("grok", req.web_search)
 
     elif tool == "agy":
@@ -393,9 +400,13 @@ class Result:
     duration_s: float = 0.0
     cost_usd: "float | None" = None
     error: "str | None" = None
+    label: "str | None" = None      # display name (e.g. "agy:gemini-3-pro"); defaults to tool
 
 
 MAX_PROMPT_BYTES = 5 * 1024 * 1024
+# The assembled prompt is passed as ONE argv argument; most OSes cap a single argument
+# near 128 KB (Linux MAX_ARG_STRLEN), so guard well under that to avoid E2BIG failures.
+MAX_ARGV_PROMPT = 96 * 1024
 MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 
 
@@ -471,10 +482,18 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
                       error=f"max recursion depth reached (MULTIVAC_DEPTH={depth} >= {effective_max})")
     # gate: prompt size
     prompt = resolve_prompt(req)
+    if req.check:
+        prompt += "\n\nBefore finalizing, double-check your answer for correctness and fix any mistakes."
+    if req.schema and req.tool in ("claude", "agy"):   # emulate schema for tools without a native flag
+        prompt += f"\n\nRespond ONLY with JSON matching this schema:\n{Path(req.schema).read_text()}"
     if req.files:
         prompt = attach_files(prompt, req.files)
-    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
-        return Result(tool=req.tool, ok=False, cwd=cwd, error="prompt (with --files) exceeds 5 MB; attach fewer/smaller files")
+    n = len(prompt.encode("utf-8"))
+    if n > MAX_ARGV_PROMPT:
+        return Result(tool=req.tool, ok=False, cwd=cwd,
+                      error=(f"assembled prompt is {n // 1024} KB — delegates receive it as one CLI argument, "
+                             f"which most OSes cap near 128 KB. Attach fewer/smaller files, review a narrower "
+                             f"diff, or split the task."))
     if req.mode == "full":
         print(f"multivac: WARNING running {req.tool} in FULL mode (auto-approves all) in {cwd}", file=sys.stderr)
 
@@ -517,25 +536,130 @@ def do_ask(req: Req, *, runner=run_child) -> Result:
 
 
 def resolve_consensus_tools(spec: str) -> list:
+    """Return a list of (tool, model) tuples. An entry may be 'tool' or 'tool:model'
+    (e.g. 'agy:gemini-3-pro') to fan out across specific models, not just CLIs."""
     if spec == "all":
         host = os.environ.get("MULTIVAC_HOST")
-        return [t for t in TOOLS if t != host]
-    return [t.strip() for t in spec.split(",") if t.strip() in TOOLS]
+        return [(t, None) for t in TOOLS if t != host]
+    out = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        tool, _, model = item.partition(":")
+        tool, model = tool.strip(), (model.strip() or None)
+        if tool in TOOLS:
+            out.append((tool, model))
+    return out
 
 
-def do_consensus(tools, base: Req, *, concurrency=3, asker=do_ask) -> list:
-    reqs = [replace(base, tool=t, session=None) for t in tools]   # consensus is stateless
-    results = []
+def _norm_spec(s):
+    return (s, None) if isinstance(s, str) else s   # accept "tool" or (tool, model)
+
+
+def do_consensus(specs, base: Req, *, concurrency=3, asker=do_ask) -> list:
+    norm = [_norm_spec(s) for s in specs]           # consensus is stateless
+    labels = [t if m is None else f"{t}:{m}" for t, m in norm]
+    reqs = [replace(base, tool=t, model=(m or base.model), session=None) for t, m in norm]
+    indexed = []
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as ex:
-        futs = {ex.submit(asker, r): r.tool for r in reqs}
+        futs = {ex.submit(asker, r): i for i, r in enumerate(reqs)}
         for fut in futs:
+            i = futs[fut]
             try:
-                results.append(fut.result())
-            except Exception as e:               # defensive: never let one tool abort the batch
-                results.append(Result(tool=futs[fut], ok=False, error=str(e)))
-    order = {t: i for i, t in enumerate(tools)}
-    results.sort(key=lambda r: order.get(r.tool, 99))
-    return results
+                res = fut.result()
+            except Exception as e:                   # defensive: never let one tool abort the batch
+                res = Result(tool=norm[i][0], ok=False, error=str(e))
+            res.label = labels[i]
+            indexed.append((i, res))
+    indexed.sort(key=lambda x: x[0])
+    return [r for _, r in indexed]
+
+
+def do_best_of(base: Req, n: int, *, asker=do_ask) -> Result:
+    """Run the same ask N times in parallel, then reconcile into one best answer (self-consistency)."""
+    single = replace(base, best_of=1, session=None)
+    results = []
+    with ThreadPoolExecutor(max_workers=max(1, min(n, 4))) as ex:
+        futs = [ex.submit(asker, single) for _ in range(max(1, n))]
+        for f in futs:
+            try:
+                results.append(f.result())
+            except Exception as e:
+                results.append(Result(tool=base.tool, ok=False, error=str(e)))
+    ok = [r for r in results if r.ok]
+    if len(ok) <= 1:
+        return ok[0] if ok else results[0]
+    syn = build_synthesis_prompt(resolve_prompt(base), ok)
+    return asker(replace(base, prompt=syn, best_of=1, files=None, schema=None, check=False, session=None))
+
+
+def do_review(specs, base: Req, *, diff_text=None, base_ref=None, commit=None,
+              synthesize=False, judge=None, concurrency=3, asker=do_ask) -> tuple:
+    """Cross-CLI code review: attach the git diff and ask each delegate to review it.
+    Returns (results, synthesis_or_None)."""
+    if diff_text is None:
+        diff_text = _git_diff(base_ref, commit, cwd=base.cwd)
+    if not diff_text.strip():
+        raise ValueError("no changes to review (working tree clean vs the given base/commit)")
+    extra = f"\n\nAdditional instructions: {base.prompt}" if base.prompt else ""
+    review_prompt = (
+        "You are a rigorous code reviewer. Review the following git diff for correctness bugs, "
+        "security issues, and unhandled edge cases. Be specific and concise; cite the file and "
+        f"line where you can.{extra}\n\n--- git diff ---\n{diff_text}"
+    )
+    rbase = replace(base, prompt=review_prompt, files=None)
+    results = do_consensus(specs, rbase, concurrency=concurrency, asker=asker)
+    synthesis = None
+    ok = [r for r in results if r.ok]
+    if synthesize and len(ok) >= 2:
+        jt = judge if judge in TOOLS else ok[0].tool
+        synthesis = asker(replace(base, tool=jt, prompt=build_synthesis_prompt(
+            "Consolidate these code reviews into one prioritized review.", ok), mode="plan", session=None))
+    return results, synthesis
+
+
+def do_debate(tools, base: Req, *, rounds=2, judge=None, asker=do_ask) -> tuple:
+    """Two delegates answer, then critique each other over rounds, then one writes the final answer.
+    Returns (transcript_list, final_Result)."""
+    a, b = tools[0], tools[1]
+    q = resolve_prompt(base)
+    transcript = []
+    ans = {}
+    for t in (a, b):
+        r = asker(replace(base, tool=t, prompt=q, session=None))
+        ans[t] = r.answer if r.ok else f"(error: {r.error})"
+        transcript.append((f"{t} (opening)", ans[t]))
+    for _ in range(max(0, rounds - 1)):
+        new = {}
+        for t, other in ((a, b), (b, a)):
+            crit = (f"Question:\n{q}\n\nYour previous answer:\n{ans[t]}\n\n"
+                    f"Another assistant answered:\n{ans[other]}\n\n"
+                    "Critique the other answer, then give your improved answer to the question.")
+            r = asker(replace(base, tool=t, prompt=crit, session=None))
+            new[t] = r.answer if r.ok else ans[t]
+            transcript.append((f"{t} (rebuttal)", new[t]))
+        ans = new
+    jt = judge if judge in TOOLS else a
+    final = asker(replace(base, tool=jt, prompt=(
+        f"Question:\n{q}\n\nTwo assistants debated. Final positions:\n"
+        f"===== {a} =====\n{ans[a]}\n\n===== {b} =====\n{ans[b]}\n\n"
+        "Write the single best final answer, noting anything they still disagree on."), mode="plan", session=None))
+    return transcript, final
+
+
+def _git_diff(base_ref, commit, *, cwd=None) -> str:
+    cwd = os.path.abspath(cwd or os.getcwd())
+    if commit:
+        argv = ["git", "-C", cwd, "show", commit]
+    elif base_ref:
+        argv = ["git", "-C", cwd, "diff", f"{base_ref}...HEAD"]
+    else:
+        argv = ["git", "-C", cwd, "diff", "HEAD"]   # uncommitted changes
+    out = subprocess.run(argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if out.returncode != 0:
+        raise ValueError(f"git diff failed: {out.stderr.strip() or 'not a git repo?'}")
+    return out.stdout
 
 
 def _version_of(tool: str):
@@ -597,6 +721,9 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--json", dest="as_json", action="store_true")
         sp.add_argument("--max-depth", type=int, default=2)
         sp.add_argument("--files", help="comma-separated file paths to attach as read-only context")
+        sp.add_argument("--check", action="store_true",
+                        help="ask the delegate to double-check and correct its own answer before finalizing")
+        sp.add_argument("--schema", help="path to a JSON schema file for structured (JSON) output")
 
     a = sub.add_parser("ask")
     a.add_argument("--tool", choices=TOOLS, required=True)
@@ -606,10 +733,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--session")
     a.add_argument("--agent")
     a.add_argument("--agents")
+    a.add_argument("--best-of-n", type=int, default=1, dest="best_of",
+                   help="run N times in parallel and reconcile into the best single answer (self-consistency)")
     add_common(a)
 
     c = sub.add_parser("consensus")
-    c.add_argument("--tools", required=True, help="comma list or 'all'")
+    c.add_argument("--tools", required=True, help="comma list or 'all' (a tool may be 'name:model', e.g. agy:gemini-3-pro)")
     gc = c.add_mutually_exclusive_group(required=True)
     gc.add_argument("--prompt")
     gc.add_argument("--prompt-file")
@@ -619,6 +748,26 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--judge", choices=TOOLS, help="which delegate synthesizes (default: first in --tools)")
     add_common(c)
 
+    r = sub.add_parser("review", help="cross-CLI code review of your git changes")
+    r.add_argument("--tools", default="all", help="comma list or 'all' (delegates that review the diff)")
+    rbase = r.add_mutually_exclusive_group()
+    rbase.add_argument("--base", help="review changes vs this base branch/ref (e.g. main)")
+    rbase.add_argument("--commit", help="review the changes introduced by this commit SHA")
+    r.add_argument("--concurrency", type=int, default=3)
+    r.add_argument("--synthesize", action="store_true", help="reconcile the reviews into one")
+    r.add_argument("--judge", choices=TOOLS)
+    r.add_argument("--prompt", help="extra review instructions (optional)")
+    add_common(r)
+
+    dbt = sub.add_parser("debate", help="two delegates critique each other over rounds, then synthesize")
+    dbt.add_argument("--tools", required=True, help="exactly two, comma-separated (e.g. codex,grok)")
+    dgt = dbt.add_mutually_exclusive_group(required=True)
+    dgt.add_argument("--prompt")
+    dgt.add_argument("--prompt-file")
+    dbt.add_argument("--rounds", type=int, default=2, help="critique rounds (default 2)")
+    dbt.add_argument("--judge", choices=TOOLS, help="who writes the final answer (default: first tool)")
+    add_common(dbt)
+
     d = sub.add_parser("doctor")
     d.add_argument("--tools", default="all")
     d.add_argument("--json", dest="as_json", action="store_true")
@@ -626,17 +775,25 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _req_from_args(args) -> Req:
-    prompt = args.prompt
+def _resolve_prompt_arg(args) -> str:
+    """Resolve the prompt from --prompt (with `-` meaning stdin) or --prompt-file."""
+    prompt = getattr(args, "prompt", None)
     if getattr(args, "prompt_file", None):
         if os.path.getsize(args.prompt_file) > MAX_PROMPT_BYTES:
             raise ValueError("prompt-file exceeds 5 MB; put large context in a file the delegate reads")
-        prompt = Path(args.prompt_file).read_text()
-    return Req(tool=args.tool, prompt=prompt, mode=args.mode, model=args.model, cwd=args.cwd,
+        return Path(args.prompt_file).read_text()
+    if prompt == "-":                      # explicit stdin: `... | multivac ask --prompt -`
+        return sys.stdin.read()
+    return prompt
+
+
+def _req_from_args(args) -> Req:
+    return Req(tool=args.tool, prompt=_resolve_prompt_arg(args), mode=args.mode, model=args.model, cwd=args.cwd,
                session=getattr(args, "session", None), agent=getattr(args, "agent", None),
                agents=getattr(args, "agents", None), web_search=args.web_search, timeout=args.timeout,
                allow_api_keys=args.allow_api_keys, yes=args.yes, as_json=args.as_json, max_depth=args.max_depth,
-               files=getattr(args, "files", None))
+               files=getattr(args, "files", None), check=getattr(args, "check", False),
+               schema=getattr(args, "schema", None), best_of=getattr(args, "best_of", 1))
 
 
 def _emit(res: Result, as_json: bool) -> int:
@@ -649,39 +806,75 @@ def _emit(res: Result, as_json: bool) -> int:
     return 0 if res.ok else 1
 
 
+def _common_req(args, prompt) -> Req:
+    """Base Req for fan-out commands (tool is a placeholder, set per delegate)."""
+    return Req(tool="_", prompt=prompt, mode=args.mode, model=args.model, cwd=args.cwd,
+               web_search=args.web_search, timeout=args.timeout, allow_api_keys=args.allow_api_keys,
+               yes=args.yes, max_depth=args.max_depth, files=getattr(args, "files", None),
+               check=getattr(args, "check", False), schema=getattr(args, "schema", None))
+
+
+def _emit_consensus(results, synthesis, as_json) -> int:
+    if as_json:
+        if synthesis is None:
+            print(json.dumps([r.__dict__ for r in results], indent=2))   # backward-compatible array
+        else:
+            print(json.dumps({"results": [r.__dict__ for r in results],
+                              "synthesis": synthesis.__dict__}, indent=2))
+    else:
+        for r in results:
+            print(f"\n===== {r.label or r.tool} =====")
+            print(_clean(r.answer) if r.ok else f"ERROR: {_clean(r.error)}")
+        if synthesis is not None:
+            print(f"\n===== synthesis (via {synthesis.label or synthesis.tool}) =====")
+            print(_clean(synthesis.answer) if synthesis.ok else f"ERROR: {_clean(synthesis.error)}")
+    return 0 if any(r.ok for r in results) else 1
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.cmd == "ask":
-            return _emit(do_ask(_req_from_args(args)), args.as_json)
+            req = _req_from_args(args)
+            res = do_best_of(req, req.best_of) if req.best_of > 1 else do_ask(req)
+            return _emit(res, args.as_json)
         if args.cmd == "consensus":
-            tools = resolve_consensus_tools(args.tools)
-            if not tools:
+            specs = resolve_consensus_tools(args.tools)
+            if not specs:
                 print("ERROR: no valid tools", file=sys.stderr); return 1
-            base = Req(tool="_", prompt=(Path(args.prompt_file).read_text() if getattr(args, "prompt_file", None) else args.prompt),
-                       mode=args.mode, model=args.model, cwd=args.cwd, web_search=args.web_search,
-                       timeout=args.timeout, allow_api_keys=args.allow_api_keys, yes=args.yes, max_depth=args.max_depth,
-                       files=getattr(args, "files", None))
-            results = do_consensus(tools, base, concurrency=args.concurrency)
+            base = _common_req(args, _resolve_prompt_arg(args))
+            results = do_consensus(specs, base, concurrency=args.concurrency)
             synthesis = None
             ok_results = [r for r in results if r.ok]
             if getattr(args, "synthesize", False) and len(ok_results) >= 2:
                 judge = args.judge if args.judge in TOOLS else ok_results[0].tool
                 synthesis = do_ask(Req(tool=judge, prompt=build_synthesis_prompt(base.prompt, ok_results),
                                        mode="plan", cwd=args.cwd, timeout=args.timeout, max_depth=args.max_depth))
+            return _emit_consensus(results, synthesis, args.as_json)
+        if args.cmd == "review":
+            specs = resolve_consensus_tools(args.tools)
+            if not specs:
+                print("ERROR: no valid tools", file=sys.stderr); return 1
+            base = _common_req(args, getattr(args, "prompt", None) or "")
+            results, synthesis = do_review(specs, base, base_ref=args.base, commit=args.commit,
+                                           synthesize=args.synthesize, judge=args.judge, concurrency=args.concurrency)
+            return _emit_consensus(results, synthesis, args.as_json)
+        if args.cmd == "debate":
+            tools = [t for t, _ in resolve_consensus_tools(args.tools)]
+            if len(tools) < 2:
+                print("ERROR: debate needs two valid tools (e.g. --tools codex,grok)", file=sys.stderr); return 1
+            base = _common_req(args, _resolve_prompt_arg(args))
+            transcript, final = do_debate(tools[:2], base, rounds=args.rounds, judge=args.judge)
             if args.as_json:
-                out = {"results": [r.__dict__ for r in results]}
-                if synthesis is not None:
-                    out["synthesis"] = synthesis.__dict__
-                print(json.dumps(out, indent=2))
+                print(json.dumps({"transcript": [{"who": w, "text": t} for w, t in transcript],
+                                  "final": final.__dict__}, indent=2))
             else:
-                for r in results:
-                    print(f"\n===== {r.tool} =====")
-                    print(_clean(r.answer) if r.ok else f"ERROR: {_clean(r.error)}")
-                if synthesis is not None:
-                    print(f"\n===== synthesis (via {synthesis.tool}) =====")
-                    print(_clean(synthesis.answer) if synthesis.ok else f"ERROR: {_clean(synthesis.error)}")
-            return 0 if any(r.ok for r in results) else 1
+                for who, text in transcript:
+                    print(f"\n----- {who} -----")
+                    print(_clean(text))
+                print(f"\n===== final answer (via {final.label or final.tool}) =====")
+                print(_clean(final.answer) if final.ok else f"ERROR: {_clean(final.error)}")
+            return 0 if final.ok else 1
         if args.cmd == "doctor":
             tools = TOOLS if args.tools == "all" else [t for t in args.tools.split(",") if t in TOOLS]
             if not tools:
