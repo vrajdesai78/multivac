@@ -18,7 +18,8 @@ Named after Asimov's Multivac — the great computer you bring every question to
 | | |
 |---|---|
 | **Delegates** | `codex` · `agy` (Gemini/Claude/GPT-OSS via Antigravity) · `claude` · `grok` |
-| **Commands** | `ask` · `consensus` (parallel fan-out) · `doctor` · `sessions` |
+| **Commands** | `ask` · `consensus` (fan-out, `--synthesize` to reconcile) · `review` (cross-CLI code review) · `debate` · `doctor` · `sessions` |
+| **Power flags** | `--files` (attach context) · `--best-of-n` · `--check` (self-verify) · `--schema` (structured output) · `agy:model` (model-level fan-out) · `--prompt -` (stdin) |
 | **Modes** | `plan` (read-only, default) · `edit` · `full` (gated behind an explicit ack) |
 | **Auth** | each delegate's own subscription login — **no per-model API keys** |
 | **Hosts** | Claude Code (`SKILL.md`) and Codex (prompt + `AGENTS.md`) |
@@ -173,10 +174,31 @@ multivac ask --tool claude --session t1 --prompt "What number did I say? Just th
 multivac sessions
 ```
 
-Common flags: `--mode`, `--model`, `--cwd`, `--timeout`, `--session`, `--agent`/`--agents`,
-`--web-search`, `--concurrency` (consensus), `--json`, `--max-depth`. Full reference:
-[`references/usage.md`](references/usage.md). Per-CLI argv, output framing, and session-id
-handling: [`references/cli-matrix.md`](references/cli-matrix.md).
+### Power moves
+
+```console
+# Cross-CLI code review of your git changes (each model reviews the diff)
+multivac review --base main --tools codex,grok --synthesize
+git diff | multivac ask --tool codex --prompt -          # or pipe anything via stdin
+
+# Self-consistency: run one model N times and reconcile into the best answer
+multivac ask --tool codex --best-of-n 3 --prompt "Prove this loop terminates"
+
+# Two models debate, critique each other, then a judge writes the final answer
+multivac debate --tools codex,grok --prompt "Monorepo or polyrepo for 3 services?"
+
+# Model-level fan-out (not just CLI-level): compare specific models on subscription
+multivac consensus --tools agy:gemini-3-pro,agy:claude-opus,codex --prompt "..."
+
+# Make a delegate double-check itself, or return structured JSON
+multivac ask --tool grok --check --prompt "What's the bug?"
+multivac ask --tool codex --schema out.schema.json --prompt "Extract the API surface"
+```
+
+Common flags: `--mode`, `--model`, `--cwd`, `--timeout`, `--session`, `--files`,
+`--agent`/`--agents`, `--check`, `--schema`, `--web-search`, `--concurrency`, `--json`,
+`--max-depth`. Full reference: [`references/usage.md`](references/usage.md). Per-CLI argv,
+output framing, and session-id handling: [`references/cli-matrix.md`](references/cli-matrix.md).
 
 ## Modes
 
